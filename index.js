@@ -189,7 +189,7 @@ function createSessionEmbed(session, hostTag) {
 /**
  * Creates the action row with the sign-up select menu.
  * @param {object} session The session data object.
- * @returns {ActionRowBuilder} The row containing the Select Menu and Cancel Button.
+ * @returns {ActionRowBuilder[]} The array containing the Select Menu and Cancel Button rows.
  */
 function createActionRow(session) {
     const roles = {
@@ -209,7 +209,8 @@ function createActionRow(session) {
     }));
 
     const selectMenu = new StringSelectMenuBuilder()
-        .setCustomId(`signup_select_${session.id}`)
+        // FIX: Changed Custom ID structure to be just 'signup_SESSIONID' to ensure correct parsing
+        .setCustomId(`signup_${session.id}`)
         .setPlaceholder('Choose your role to sign up...')
         .addOptions(options);
 
@@ -430,12 +431,19 @@ client.on('interactionCreate', async interaction => {
     // --- Component (Button/Select Menu) Handling ---
     else if (interaction.isStringSelectMenu() || interaction.isButton()) {
         const customId = interaction.customId;
-        const [action, sessionId] = customId.split('_');
+        // Correctly split the ID into two parts: action and session ID
+        const parts = customId.split('_');
+        const action = parts[0];
+        const sessionId = parts[1]; // Now reliably the session ID
 
         const currentSessions = loadSessions();
         const currentSession = currentSessions[sessionId];
 
         if (!currentSession) {
+            // FIX: Use deferUpdate() or deferReply() immediately to avoid the 10062 error
+            if (interaction.isMessageComponent()) {
+                await interaction.deferUpdate().catch(() => {}); // Safely defer to avoid crash
+            }
             return interaction.reply({ content: '❌ This session is no longer active or the data was lost. Please ask a Host to create a new one.', ephemeral: true });
         }
         
@@ -454,9 +462,9 @@ client.on('interactionCreate', async interaction => {
             return null; // User not found in any roster
         };
         
-        // --- Sign Up Action ---
+        // --- Sign Up Action (Select Menu) ---
         if (action === 'signup' && interaction.isStringSelectMenu()) {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ ephemeral: true }); // Acknowledge immediately
 
             const roleToSignFor = interaction.values[0]; // e.g., 'driver', 'staff', 'trainee'
             const rosterCategory = roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
@@ -477,8 +485,7 @@ client.on('interactionCreate', async interaction => {
             const maxCapacity = currentSession[`max${roleToSignFor.charAt(0).toUpperCase() + roleToSignFor.slice(1)}s`];
             if (maxCapacity > 0 && currentSession[rosterCategory].length >= maxCapacity) {
                  // Revert the select menu change visually by editing the message without changing the selection
-                await interaction.editReply({ content: `❌ The **${roleToSignFor.toUpperCase()}** roster is currently full (${maxCapacity}/${maxCapacity}). Please choose another role or try again later.`, ephemeral: true });
-                return;
+                return interaction.followUp({ content: `❌ The **${roleToSignFor.toUpperCase()}** roster is currently full (${maxCapacity}/${maxCapacity}). Please choose another role or try again later.`, ephemeral: true });
             }
 
             // 3. Add to the new roster
@@ -509,7 +516,7 @@ client.on('interactionCreate', async interaction => {
         
         // --- Cancel Signup Action (Button) ---
         else if (action === 'cancel' && interaction.isButton()) {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ ephemeral: true }); // Acknowledge immediately
             
             const existingEntry = findRosterIndex(currentSession);
 
