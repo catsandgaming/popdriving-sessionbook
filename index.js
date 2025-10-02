@@ -2,9 +2,8 @@
 
 // Load environment variables (like the BOT_TOKEN and Role IDs) from the .env file
 require('dotenv').config();
-const fs = require('fs');
-// Include the standard HTTP module needed for the Render web server
-const http = require('http'); 
+// CRITICAL FIX: Use fs/promises for asynchronous file I/O to prevent interaction timeout errors
+const fs = require('fs/promises'); 
 const { 
     Client, 
     GatewayIntentBits, 
@@ -14,10 +13,14 @@ const {
     ButtonBuilder, 
     ButtonStyle, 
     PermissionsBitField, 
-    ChannelType, // Needed for specifying text channel type in command
-    StringSelectMenuBuilder, // NEW: Needed for staff management dropdowns
-    StringSelectMenuOptionBuilder // NEW: Needed for dropdown options
+    ChannelType,
+    StringSelectMenuBuilder,
+    StringSelectMenuOptionBuilder,
+    // Add the MessageFlags constant for non-deprecated ephemeral responses (64)
+    MessageFlags 
 } = require('discord.js');
+// Include the standard HTTP module needed for the Render web server
+const http = require('http'); 
 
 // --- Configuration Constants from .env ---
 const TOKEN = process.env.BOT_TOKEN;
@@ -54,29 +57,32 @@ function createWebServer() {
 }
 
 /**
- * Loads session data from the persistent JSON file.
- * @returns {object} The sessions object, or an empty object if file not found/invalid.
+ * Loads session data from the persistent JSON file asynchronously.
+ * @returns {Promise<object>} The sessions object, or an empty object if file not found/invalid.
  */
-function loadSessions() {
+async function loadSessions() {
     try {
-        if (fs.existsSync(SESSIONS_FILE)) {
-            const data = fs.readFileSync(SESSIONS_FILE, 'utf8');
-            return JSON.parse(data);
-        }
-        return {};
+        // Use fs.promises.readFile for non-blocking I/O
+        const data = await fs.readFile(SESSIONS_FILE, 'utf8');
+        return JSON.parse(data);
     } catch (error) {
+        // If the file doesn't exist (E.g., first run), return an empty object
+        if (error.code === 'ENOENT') {
+            return {};
+        }
         console.error('Error loading sessions:', error);
         return {};
     }
 }
 
 /**
- * Saves session data to the persistent JSON file.
+ * Saves session data to the persistent JSON file asynchronously.
  * @param {object} sessions The sessions object to save.
  */
-function saveSessions(sessions) {
+async function saveSessions(sessions) {
     try {
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
+        // Use fs.promises.writeFile for non-blocking I/O
+        await fs.writeFile(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
     } catch (error) {
         console.error('Error saving sessions:', error);
     }
@@ -117,6 +123,7 @@ function createNewSession(channelId, messageId, hostId, startTime, location, dur
 function isHostOrStaff(member) {
     const hostCheck = member.roles.cache.has(HOST_ID);
     const juniorStaffCheck = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
+    // Check if the member is the guild owner as a fallback for high permissions
     return hostCheck || juniorStaffCheck || member.user.id === member.guild.ownerId;
 }
 
@@ -330,8 +337,8 @@ client.on('interactionCreate', async interaction => {
  * Handles the /sessionbook slash command.
  */
 async function handleSessionBookCommand(interaction) {
-    // Initial deferral ensures the command doesn't time out.
-    await interaction.deferReply({ ephemeral: true });
+    // Initial deferral ensures the command doesn't time out. Use flags: 64 for ephemeral.
+    await interaction.deferReply({ flags: 64 });
 
     const member = interaction.guild.members.cache.get(interaction.user.id);
     const hostRoleCheck = member.roles.cache.has(HOST_ID);
@@ -350,7 +357,8 @@ async function handleSessionBookCommand(interaction) {
     const sessionType = interaction.options.getString('type') || 'POP';
     
     const hostId = interaction.user.id;
-    let currentSessions = loadSessions();
+    // CRITICAL: Await loadSessions() as it is now asynchronous
+    let currentSessions = await loadSessions();
     const sessionId = interaction.id; // Using the interaction ID as a unique session ID for simplicity
 
     // Final check for channel permissions
@@ -377,7 +385,8 @@ async function handleSessionBookCommand(interaction) {
 
         // Save the new session
         currentSessions[sessionId] = initialSessionData;
-        saveSessions(currentSessions);
+        // CRITICAL: Await saveSessions() as it is now asynchronous
+        await saveSessions(currentSessions);
 
         await interaction.editReply({ content: `✅ POP Driving Session successfully booked and posted in ${targetChannel}!` });
 
@@ -393,11 +402,11 @@ async function handleSessionBookCommand(interaction) {
 async function handleSessionButtonInteraction(interaction) {
     if (!interaction.customId.startsWith('signup_') && interaction.customId !== 'close_session' && interaction.customId !== 'manage_roster_staff') return;
 
-    // CRITICAL FIX: Defer reply ephemerally to give the bot more time to process and avoid "Unknown Interaction" errors.
-    await interaction.deferReply({ ephemeral: true }); 
+    // CRITICAL FIX: Defer reply immediately before any time-consuming logic. Use flags: 64.
+    await interaction.deferReply({ flags: 64 }); 
 
-    // Find the session associated with the message the button was clicked on
-    let currentSessions = loadSessions();
+    // CRITICAL: Await loadSessions() as it is now asynchronous
+    let currentSessions = await loadSessions();
     const sessionId = Object.keys(currentSessions).find(key => currentSessions[key].messageId === interaction.message.id);
 
     if (!sessionId) {
@@ -461,7 +470,8 @@ async function handleSessionButtonInteraction(interaction) {
         // Update session status and remove components
         currentSession.status = 'closed';
         currentSessions[sessionId] = currentSession;
-        saveSessions(currentSessions);
+        // CRITICAL: Await saveSessions()
+        await saveSessions(currentSessions);
 
         const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
         const updatedEmbed = createSessionEmbed(currentSession, hostTag);
@@ -520,7 +530,8 @@ async function handleSessionButtonInteraction(interaction) {
             const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
             const updatedEmbed = createSessionEmbed(currentSession, hostTag);
             currentSessions[sessionId] = currentSession;
-            saveSessions(currentSessions);
+            // CRITICAL: Await saveSessions()
+            await saveSessions(currentSessions);
             await interaction.message.edit({ embeds: [updatedEmbed], components: interaction.message.components });
             return interaction.editReply({ content: `✅ You have successfully **cancelled** your signup as a **${roleToSignFor.toUpperCase()}**!` });
         }
@@ -531,7 +542,8 @@ async function handleSessionButtonInteraction(interaction) {
 
         // Update the data store
         currentSessions[sessionId] = currentSession;
-        saveSessions(currentSessions);
+        // CRITICAL: Await saveSessions()
+        await saveSessions(currentSessions);
 
         // --- 4. Update the Message Embed ---
         const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
@@ -559,8 +571,8 @@ async function handleSessionButtonInteraction(interaction) {
  * Handles the first Select Menu interaction (Staff selects a user).
  */
 async function handleUserSelectionForRoleChange(interaction) {
-    // CRITICAL: Defer to prevent timeout
-    await interaction.deferReply({ ephemeral: true });
+    // CRITICAL: Defer to prevent timeout. Use flags: 64.
+    await interaction.deferReply({ flags: 64 });
 
     const member = interaction.guild.members.cache.get(interaction.user.id);
     if (!isHostOrStaff(member)) {
@@ -606,8 +618,8 @@ async function handleUserSelectionForRoleChange(interaction) {
  * Handles the second Select Menu interaction (Staff selects the new role and executes the change).
  */
 async function handleRoleChangeExecution(interaction) {
-    // CRITICAL: Defer to prevent timeout
-    await interaction.deferReply({ ephemeral: true });
+    // CRITICAL: Defer to prevent timeout. Use flags: 64.
+    await interaction.deferReply({ flags: 64 });
 
     const member = interaction.guild.members.cache.get(interaction.user.id);
     if (!isHostOrStaff(member)) {
@@ -620,7 +632,8 @@ async function handleRoleChangeExecution(interaction) {
     const targetUserId = parts[4];
     const newRole = interaction.values[0]; // 'driver', 'staff', 'trainee', or 'remove'
 
-    let currentSessions = loadSessions();
+    // CRITICAL: Await loadSessions()
+    let currentSessions = await loadSessions();
     let currentSession = currentSessions[sessionId];
 
     if (!currentSession) {
@@ -638,20 +651,24 @@ async function handleRoleChangeExecution(interaction) {
 
     // Save changes
     currentSessions[sessionId] = currentSession;
-    saveSessions(currentSessions);
+    // CRITICAL: Await saveSessions()
+    await saveSessions(currentSessions);
 
     // Update the message embed
     const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
     const updatedEmbed = createSessionEmbed(currentSession, hostTag);
 
     try {
+        // Since we deferred the reply, we must use interaction.editReply to remove the select menus
+        await interaction.editReply({ 
+            content: newRole === 'remove'
+                ? `✅ **${targetUser.tag}** has been completely **REMOVED** from the roster.`
+                : `✅ **${targetUser.tag}**'s role has been successfully changed to **${newRole.toUpperCase()}**.`,
+            components: [] // Remove the select menu components
+        });
+        
+        // And now we update the original message to reflect the new roster
         await interaction.message.edit({ embeds: [updatedEmbed], components: interaction.message.components });
-
-        const confirmationMessage = newRole === 'remove'
-            ? `✅ **${targetUser.tag}** has been completely **REMOVED** from the roster.`
-            : `✅ **${targetUser.tag}**'s role has been successfully changed to **${newRole.toUpperCase()}**.`;
-
-        return interaction.editReply({ content: confirmationMessage, components: [] }); // Remove the select menu components
 
     } catch (error) {
         console.error('Error executing role change and updating message:', error);
