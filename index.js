@@ -15,7 +15,7 @@ const {
     ButtonStyle, 
     PermissionsBitField, 
     MessageFlags, // Used for ephemeral replacement
-    Collection // Used for command fetching
+    Collection 
 } = require('discord.js');
 
 // --- Configuration Constants from .env ---
@@ -348,6 +348,16 @@ client.on('interactionCreate', async interaction => {
             // --- 2. Gather Command Options (Only Time and Duration) ---
             const time = options.getString('time');
             const duration = options.getString('duration');
+            
+            // --- DEFENSIVE CHECK AGAINST STALE COMMANDS ---
+            if (!time || !duration) {
+                console.error('Command failed to retrieve options. Time or Duration is missing.', { time, duration });
+                return interaction.editReply({ 
+                    content: '❌ Command Error: The system failed to read the **Time** or **Duration** fields. Please ensure you are using the command that shows **Time** and **Duration** as required inputs. You might need to refresh Discord (Ctrl+R/Cmd+R).', 
+                    ephemeral: true 
+                });
+            }
+            
             const channelId = interaction.channelId; 
             const hostId = member.id;
             
@@ -392,21 +402,6 @@ client.on('interactionCreate', async interaction => {
                 console.error('Error sending session message or saving data:', error);
                 return interaction.editReply({ content: '❌ An error occurred while posting the session. Please check bot permissions and try again.' });
             }
-        } else if (commandName === 'checkcommands') {
-            try {
-                await interaction.deferReply({ ephemeral: true });
-                const globalCommands = await client.application.commands.fetch();
-                let commandList = globalCommands.map(cmd => `• /${cmd.name} (ID: ${cmd.id})`).join('\n');
-                
-                if (commandList.length === 0) {
-                     commandList = 'No global slash commands found.';
-                }
-                
-                return interaction.editReply({ content: `✅ **Current Global Commands**:\n\`\`\`\n${commandList}\n\`\`\`` });
-            } catch (error) {
-                console.error('Error fetching commands:', error);
-                return interaction.editReply({ content: '❌ Failed to fetch commands.' });
-            }
         }
     } else if (interaction.isButton()) {
         await handleButtonInteraction(interaction);
@@ -432,22 +427,16 @@ client.on('clientReady', async () => {
                 .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
                 .setRequired(true));
 
-    // Define the temporary debug command
-    const checkCommandsCommand = new SlashCommandBuilder()
-        .setName('checkcommands')
-        .setDescription('Displays all currently registered global slash commands (for debugging).');
-
     // Array of commands we want to exist
-    const commandsToRegister = [sessionBookCommand, checkCommandsCommand];
+    const commandsToRegister = [sessionBookCommand]; // Only the correct command
     
     try {
-        console.log('Attempting to register and update global commands...');
+        console.log('Attempting to aggressively clean up and register global commands...');
         
-        // This command set operation clears ALL existing global commands and replaces them
-        // with the list provided in the array (effectively deleting the old ones).
+        // This command set operation clears ALL existing global commands and replaces them.
         await client.application.commands.set(commandsToRegister);
         
-        console.log('Global commands successfully registered. Check Discord cache (CTRL+R or CMD+R).');
+        console.log('Global command /sessionbook registered successfully. Please hard refresh Discord (Ctrl+R/Cmd+R).');
         
         // Log the final state of commands for console verification
         const finalCommands = await client.application.commands.fetch();
