@@ -1,0 +1,16 @@
+{
+  "name": "pop-driving-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for managing driving session signups and rosters.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "dotenv": "^17.2.3"
+  }
+}
