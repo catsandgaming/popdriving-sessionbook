@@ -14,7 +14,8 @@ const {
     ButtonBuilder, 
     ButtonStyle, 
     PermissionsBitField, 
-    MessageFlags // Used for ephemeral replacement
+    MessageFlags, // Used for ephemeral replacement
+    Collection // Used for command fetching
 } = require('discord.js');
 
 // --- Configuration Constants from .env ---
@@ -330,7 +331,8 @@ client.on('interactionCreate', async interaction => {
             
             // CRITICAL FIX: Deferral prevents the 3-second timeout (Unknown interaction)
             try {
-                await interaction.deferReply({ flags: MessageFlags.Ephemeral }); 
+                // Use true instead of MessageFlags.Ephemeral for simplicity
+                await interaction.deferReply({ ephemeral: true }); 
             } catch (e) {
                 if (e.code === 10062) return; 
                 console.error('CRITICAL: Slash command deferral failed (Timeout/Unknown Interaction).', e);
@@ -390,6 +392,21 @@ client.on('interactionCreate', async interaction => {
                 console.error('Error sending session message or saving data:', error);
                 return interaction.editReply({ content: '❌ An error occurred while posting the session. Please check bot permissions and try again.' });
             }
+        } else if (commandName === 'checkcommands') {
+            try {
+                await interaction.deferReply({ ephemeral: true });
+                const globalCommands = await client.application.commands.fetch();
+                let commandList = globalCommands.map(cmd => `• /${cmd.name} (ID: ${cmd.id})`).join('\n');
+                
+                if (commandList.length === 0) {
+                     commandList = 'No global slash commands found.';
+                }
+                
+                return interaction.editReply({ content: `✅ **Current Global Commands**:\n\`\`\`\n${commandList}\n\`\`\`` });
+            } catch (error) {
+                console.error('Error fetching commands:', error);
+                return interaction.editReply({ content: '❌ Failed to fetch commands.' });
+            }
         }
     } else if (interaction.isButton()) {
         await handleButtonInteraction(interaction);
@@ -397,12 +414,12 @@ client.on('interactionCreate', async interaction => {
 });
 
 
-// --- Slash Command Definition and Registration (Fixing Duplicates) ---
+// --- Slash Command Definition and Registration ---
 
 client.on('clientReady', async () => { 
     console.log(`Bot is logged in as ${client.user.tag}!`);
 
-    // Define the slash command (ONLY REQUIRES TIME AND DURATION)
+    // Define the correct slash command
     const sessionBookCommand = new SlashCommandBuilder()
         .setName('sessionbook')
         .setDescription('Books a new driving session and posts it to the channel where this command is run.')
@@ -415,17 +432,27 @@ client.on('clientReady', async () => {
                 .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
                 .setRequired(true));
 
+    // Define the temporary debug command
+    const checkCommandsCommand = new SlashCommandBuilder()
+        .setName('checkcommands')
+        .setDescription('Displays all currently registered global slash commands (for debugging).');
+
+    // Array of commands we want to exist
+    const commandsToRegister = [sessionBookCommand, checkCommandsCommand];
+    
     try {
-        // FIX: Aggressively clear ALL existing global commands first to eliminate duplicates.
-        // This is the best way to ensure Discord's cache doesn't hold onto old, phantom commands.
-        console.log('Attempting aggressive command cleanup: Deleting all existing global commands...');
-        await client.application.commands.set([]);
+        console.log('Attempting to register and update global commands...');
         
-        // Register only the single, correct command
-        console.log('Registering the single /sessionbook command...');
-        await client.application.commands.set([sessionBookCommand]);
+        // This command set operation clears ALL existing global commands and replaces them
+        // with the list provided in the array (effectively deleting the old ones).
+        await client.application.commands.set(commandsToRegister);
         
-        console.log('Slash command /sessionbook registered successfully.');
+        console.log('Global commands successfully registered. Check Discord cache (CTRL+R or CMD+R).');
+        
+        // Log the final state of commands for console verification
+        const finalCommands = await client.application.commands.fetch();
+        console.log(`Final registered commands (${finalCommands.size}):`, finalCommands.map(c => `/${c.name}`));
+
     } catch (error) {
         console.error('Failed to register slash commands:', error);
     }
