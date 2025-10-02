@@ -104,7 +104,7 @@ function createSessionEmbed(session, hostTag) {
         // New Title
         .setTitle('📢 This is a scheduled POP driving session. Sign up below! 🚗')
         .setDescription(
-            // Only Host, Time, Duration, and Channel are displayed now.
+            // Location is removed completely from the embed structure.
             `**Host**\n<@${session.hostId}> (${hostTag})\n` +
             `**Time**\n${timeDisplay}\n` +
             `**Duration**\n${session.duration}\n` +
@@ -173,11 +173,21 @@ function createSessionButtons(sessionId) {
 async function handleButtonInteraction(interaction) {
     if (!interaction.isButton()) return;
 
-    // Acknowledge the interaction immediately to prevent timeout errors (DiscordAPIError[10062])
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(e => {
-        if (e.code === 10062) return; 
-        console.warn(`Button Deferal failed for ${interaction.customId}. Interaction might be stale.`, e);
-    });
+    // CRITICAL FIX: Deferral must be wrapped in try/catch and we must exit 
+    // if it fails to prevent the InteractionNotReplied crash.
+    try {
+        // Acknowledge the interaction immediately as ephemeral (visible only to the user who clicked)
+        await interaction.deferReply({ ephemeral: true }); 
+    } catch (e) {
+        // Error code 10062 means the interaction has timed out (stale) or was already acknowledged.
+        if (e.code === 10062) {
+            console.warn(`Stale interaction detected and ignored: ${interaction.customId}`);
+            return; // Gracefully exit.
+        }
+        console.error(`Failed to defer button interaction ${interaction.customId}:`, e);
+        return; // Prevents the fatal crash on subsequent editReply calls.
+    }
+
 
     const [action, sessionId, roleToSignFor] = interaction.customId.split('_');
     const member = interaction.member;
