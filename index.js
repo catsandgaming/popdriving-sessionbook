@@ -397,7 +397,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 
-// --- Slash Command Definition and Registration ---
+// --- Slash Command Definition and Registration (Fixing Duplicates) ---
 
 client.on('clientReady', async () => { 
     console.log(`Bot is logged in as ${client.user.tag}!`);
@@ -415,9 +415,16 @@ client.on('clientReady', async () => {
                 .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
                 .setRequired(true));
 
-    // Register the command
     try {
+        // FIX: Aggressively clear ALL existing global commands first to eliminate duplicates.
+        // This is the best way to ensure Discord's cache doesn't hold onto old, phantom commands.
+        console.log('Attempting aggressive command cleanup: Deleting all existing global commands...');
+        await client.application.commands.set([]);
+        
+        // Register only the single, correct command
+        console.log('Registering the single /sessionbook command...');
         await client.application.commands.set([sessionBookCommand]);
+        
         console.log('Slash command /sessionbook registered successfully.');
     } catch (error) {
         console.error('Failed to register slash commands:', error);
