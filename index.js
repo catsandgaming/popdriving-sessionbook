@@ -262,17 +262,16 @@ async function handleStartSessionCommand(interaction) {
 async function handleSessionButtonInteraction(interaction) {
     if (!interaction.customId.startsWith('signup_') && interaction.customId !== 'close_session') return;
 
-    // Use deferReply with ephemeral set to false for messages that should be public,
-    // but since this is an interaction update, deferUpdate is correct for buttons.
-    await interaction.deferUpdate(); 
+    // CRITICAL FIX: Defer reply ephemerally to give the bot more time to process and avoid "Unknown Interaction" errors.
+    await interaction.deferReply({ ephemeral: true }); 
 
     // Find the session associated with the message the button was clicked on
     let currentSessions = loadSessions();
     const sessionId = Object.keys(currentSessions).find(key => currentSessions[key].messageId === interaction.message.id);
 
     if (!sessionId) {
-        // Use followUp here since the deferUpdate was used above.
-        return interaction.followUp({ content: '❌ Could not find an active session associated with this message.', ephemeral: true });
+        // Use editReply to deliver the final ephemeral message after deferral
+        return interaction.editReply({ content: '❌ Could not find an active session associated with this message.' });
     }
 
     let currentSession = currentSessions[sessionId];
@@ -286,7 +285,7 @@ async function handleSessionButtonInteraction(interaction) {
         const ownerCheck = interaction.user.id === interaction.guild.ownerId;
 
         if (!hostCheck && !juniorStaffCheck && !ownerCheck) {
-            return interaction.followUp({ content: '❌ Only the session host or authorized staff can close this session.', ephemeral: true });
+            return interaction.editReply({ content: '❌ Only the session host or authorized staff can close this session.' });
         }
 
         // Update session status and remove components
@@ -298,17 +297,23 @@ async function handleSessionButtonInteraction(interaction) {
         const updatedEmbed = createSessionEmbed(currentSession, hostTag);
 
         try {
-            await interaction.editReply({ embeds: [updatedEmbed], components: [] }); // Remove buttons
-            await interaction.followUp({ content: `✅ Session successfully closed by <@${interaction.user.id}>.`, ephemeral: false });
+            // Edit the original message to reflect closure and remove buttons
+            await interaction.message.edit({ embeds: [updatedEmbed], components: [] }); 
+            // Send public confirmation message via followUp
+            await interaction.channel.send({ content: `✅ Session successfully closed by <@${interaction.user.id}>.`, ephemeral: false });
+
+            // Final confirmation to the user who clicked the button via editReply
+            return interaction.editReply({ content: `✅ The session has been marked as closed and the buttons have been removed from the message.` });
+
         } catch (error) {
             console.error('Error closing session:', error);
-            await interaction.followUp({ content: '❌ Failed to close the session and update the message.', ephemeral: true });
+            return interaction.editReply({ content: '❌ Failed to close the session and update the message.' });
         }
 
     } else if (interaction.customId.startsWith('signup_')) {
         // --- Handle Sign-up ---
         if (currentSession.status !== 'open') {
-            return interaction.followUp({ content: '❌ This session is already closed for signups.', ephemeral: true });
+            return interaction.editReply({ content: '❌ This session is already closed for signups.' });
         }
 
         const customId = interaction.customId; // e.g., 'signup_driver'
@@ -318,18 +323,17 @@ async function handleSessionButtonInteraction(interaction) {
         // --- 1. Role Check ---
         let roleName = null;
         if (roleToSignFor === 'driver') {
-            // Drivers are assumed to be open to everyone, no role check needed.
             roleName = 'Driver';
         } else if (roleToSignFor === 'staff') {
             const hasStaffRole = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id)) || member.roles.cache.has(HOST_ID);
             if (!hasStaffRole) {
-                return interaction.followUp({ content: '❌ You must be a Staff or Session Host to sign up as Staff.', ephemeral: true });
+                return interaction.editReply({ content: '❌ You must be a Staff or Session Host to sign up as Staff.' });
             }
             roleName = 'Staff';
         } else if (roleToSignFor === 'trainee') {
             const hasTraineeRole = member.roles.cache.has(TRAINEE_ID);
             if (!hasTraineeRole) {
-                return interaction.followUp({ content: '❌ You must have the Trainee role to sign up as a Trainee.', ephemeral: true });
+                return interaction.editReply({ content: '❌ You must have the Trainee role to sign up as a Trainee.' });
             }
             roleName = 'Trainee';
         }
@@ -343,7 +347,7 @@ async function handleSessionButtonInteraction(interaction) {
         );
 
         if (isAlreadySignedUp) {
-            return interaction.followUp({ content: `⚠️ You are already signed up for this session in another role.`, ephemeral: true });
+            return interaction.editReply({ content: `⚠️ You are already signed up for this session in another role. To change your role, a host must manually remove you.` });
         }
 
         // --- 4. Add the Member to the Session Roster ---
@@ -367,20 +371,16 @@ async function handleSessionButtonInteraction(interaction) {
         const updatedEmbed = createSessionEmbed(currentSession, hostTag);
 
         try {
-            // Find the original message and update the embed with the new roster
-            const messageChannel = await client.channels.fetch(currentSession.channelId);
-            const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
+            // Edit the original message (from interaction.message) with the updated embed
+            // and keep the existing components (buttons)
+            await interaction.message.edit({ embeds: [updatedEmbed], components: interaction.message.components });
 
-            // Fetch the current components (buttons/menu) to ensure they persist
-            const existingComponents = messageToEdit.components;
-
-            await messageToEdit.edit({ embeds: [updatedEmbed], components: existingComponents });
-
-            await interaction.followUp({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!`, ephemeral: true });
+            // Final confirmation to the user who clicked the button via editReply
+            return interaction.editReply({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!` });
 
         } catch (error) {
             console.error('Error signing up and updating message:', error);
-            await interaction.followUp({ content: '❌ Failed to update the session roster. Please try again.', ephemeral: true });
+            return interaction.editReply({ content: '❌ Failed to update the session roster. Please try again.' });
         }
     }
 }
