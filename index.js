@@ -14,7 +14,7 @@ const {
     ButtonBuilder, 
     ButtonStyle, 
     PermissionsBitField, 
-    ChannelType, // Needed for specifying text channel type in command
+    ChannelType, 
     MessageFlags // Used for ephemeral replacement
 } = require('discord.js');
 
@@ -77,6 +77,7 @@ function saveSessions(sessions) {
 
 /**
  * Creates the Discord embed for a session with the new layout, emojis, and fields.
+ * Handles the time display to prevent giberish if the time string is invalid.
  * @param {Object} session The session data.
  * @param {string} hostTag The Discord tag of the host.
  * @returns {EmbedBuilder}
@@ -86,31 +87,33 @@ function createSessionEmbed(session, hostTag) {
     const staffCount = session.juniorstaff.length;
     const traineesCount = session.trainees.length;
 
-    // Try to get a Unix timestamp for relative time display if the input time is parseable
+    // --- Time Display Logic ---
     let timeDisplay = session.time;
-    try {
-        const timestamp = Math.floor(Date.parse(session.time) / 1000);
-        // Use Discord's T-format for relative time
+    const parsedTime = Date.parse(session.time);
+
+    // Only use Discord's relative timestamp if the user input can be reliably parsed into a valid date.
+    if (!isNaN(parsedTime)) {
+        const timestamp = Math.floor(parsedTime / 1000);
+        // Display the exact time (f) and the relative time (R)
         timeDisplay = `<t:${timestamp}:f> (<t:${timestamp}:R>)`;
-    } catch (e) {
-        // If parsing fails, just use the raw string
-        console.warn(`Could not parse session time string: ${session.time}. Displaying as plain text.`);
-    }
+    } 
+    // If not parseable, timeDisplay remains the raw session.time string to avoid garbled output.
+
 
     const embed = new EmbedBuilder()
         .setColor(0x0099FF)
         // New Title
         .setTitle('📢 This is a scheduled POP driving session. Sign up below! 🚗')
         .setDescription(
-            // New descriptive fields with improved formatting
+            // Updated descriptive fields (Removed Location, as per user request)
             `**Host**\n<@${session.hostId}> (${hostTag})\n` +
             `**Time**\n${timeDisplay}\n` +
             `**Duration**\n${session.duration}\n` +
-            `**Location**\n${session.title}\n\n` +
+            `**Channel**\n<#${session.channelId}>\n\n` + // Added channel where announcement was made
             `**— — — Roster Signups — — —**`
         )
         .addFields(
-            // Roster Fields (Set to inline: false to force separation/new lines)
+            // Roster Fields 
             { 
                 name: `🏎️ Drivers (${driversCount})`, 
                 value: session.drivers.map(u => `<@${u.id}>`).join('\n') || 'No drivers signed up yet.', 
@@ -145,9 +148,8 @@ function createSessionButtons(sessionId) {
         .setStyle(ButtonStyle.Primary);
 
     const juniorStaffButton = new ButtonBuilder()
-        // The role name in the customId remains 'juniorstaff' for internal logic
         .setCustomId(`SIGNUP_${sessionId}_juniorstaff`) 
-        .setLabel('Sign up as Staff') // **DISPLAY NAME IS STAFF**
+        .setLabel('Sign up as Staff')
         .setStyle(ButtonStyle.Secondary);
 
     const traineeButton = new ButtonBuilder()
@@ -189,15 +191,12 @@ async function handleButtonInteraction(interaction) {
 
     // Function to check if a user has a required role (using the environment variables)
     const hasRequiredRole = (role) => {
-        // 'juniorstaff' uses the ENV variables HOST_ID or JUNIOR_STAFF_IDS
         if (role === 'juniorstaff') {
             return member.roles.cache.has(HOST_ID) || JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
         }
-        // 'trainee' uses the TRAINEE_ID
         if (role === 'trainee') {
             return member.roles.cache.has(TRAINEE_ID);
         }
-        // 'driver' is assumed open to all
         return true; 
     };
 
@@ -213,7 +212,7 @@ async function handleButtonInteraction(interaction) {
         // Edit the original message to reflect closure and disable buttons
         const closeEmbed = new EmbedBuilder()
             .setColor(0xFF0000)
-            .setTitle(`Session Closed: ${currentSession.title}`)
+            .setTitle(`Session Closed: ${currentSession.title || 'Driving Session'}`)
             .setDescription(`The session hosted by <@${currentSession.hostId}> has been closed.`)
             .setTimestamp();
 
@@ -227,7 +226,6 @@ async function handleButtonInteraction(interaction) {
 
         } catch (error) {
             console.error('Error closing session:', error);
-            // Even if the message fails to edit (e.g., deleted), the data is removed.
             return interaction.editReply({ content: '❌ Failed to close and update the message. Data has been removed.' });
         }
     }
@@ -242,7 +240,7 @@ async function handleButtonInteraction(interaction) {
             return interaction.editReply({ content: `❌ You do not have the required role to sign up as **${roleName.toUpperCase()}**.` });
         }
 
-        // --- 2. Check for existing sign-up ---
+        // --- 2. Check for existing sign-up (and auto-change roles) ---
         let existingRole = null;
         for (const key of ['drivers', 'juniorstaff', 'trainees']) {
             if (currentSession[key] && Array.isArray(currentSession[key]) && currentSession[key].some(u => u.id === member.id)) {
@@ -251,16 +249,18 @@ async function handleButtonInteraction(interaction) {
             }
         }
         
+        const newRoleName = roleToSignFor === 'juniorstaff' ? 'Staff' : roleToSignFor;
+
+        // If they are already signed up in this role, send warning and stop
+        if (existingRole === rosterCategory) {
+            return interaction.editReply({ content: `⚠️ You are already signed up as **${newRoleName.toUpperCase()}**.` });
+        }
+
+        // --- Handle Role Change ---
         if (existingRole) {
             const existingRoleName = existingRole === 'juniorstaff' ? 'Staff' : existingRole.slice(0, -1);
-            const newRoleName = roleToSignFor === 'juniorstaff' ? 'Staff' : roleToSignFor;
-
-            // If they are trying to sign up as the role they already have
-            if (existingRole === rosterCategory) {
-                 return interaction.editReply({ content: `⚠️ You are already signed up as **${newRoleName.toUpperCase()}**.` });
-            }
-
-            // If they are signed up in another role, let them change roles automatically
+            
+            // Remove user from the old role
             currentSession[existingRole] = currentSession[existingRole].filter(u => u.id !== member.id);
             
             // Add user to the new role
@@ -298,11 +298,10 @@ async function handleButtonInteraction(interaction) {
         // --- 4. Update the Message Embed ---
         const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
         const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-        const roleName = roleToSignFor === 'juniorstaff' ? 'Staff' : roleToSignFor;
 
         try {
             await interaction.message.edit({ embeds: [updatedEmbed], components: interaction.message.components });
-            return interaction.editReply({ content: `✅ You have successfully signed up as **${roleName.toUpperCase()}**!` });
+            return interaction.editReply({ content: `✅ You have successfully signed up as **${newRoleName.toUpperCase()}**!` });
 
         } catch (error) {
             console.error('Error signing up and updating message:', error);
@@ -335,10 +334,10 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ content: '❌ You do not have permission to book a session.' });
             }
 
-            // --- 2. Gather Command Options (NOW INCLUDES DURATION) ---
-            const title = options.getString('title'); // This is the Location
+            // --- 2. Gather Command Options ---
+            // Removed 'title' (Location) as requested.
             const time = options.getString('time');
-            const duration = options.getString('duration'); // NEW FIELD
+            const duration = options.getString('duration');
             const channelId = interaction.channelId; 
             const hostId = member.id;
             
@@ -346,9 +345,9 @@ client.on('interactionCreate', async interaction => {
             const sessionId = generateSessionId(channelId);
             const newSession = {
                 id: sessionId,
-                title: title,
+                title: 'N/A', // Default title since it's no longer a required field
                 time: time,
-                duration: duration, // Add duration here
+                duration: duration, 
                 channelId: channelId,
                 hostId: hostId,
                 drivers: [],
@@ -377,7 +376,7 @@ client.on('interactionCreate', async interaction => {
                 
                 // --- 6. Final Command Confirmation ---
                 return interaction.editReply({ 
-                    content: `✅ Session **${title}** successfully booked. See the post in <#${channelId}>.`, 
+                    content: `✅ Session successfully booked for **${time}** in <#${channelId}>.`, 
                 });
 
             } catch (error) {
@@ -397,19 +396,15 @@ client.on('interactionCreate', async interaction => {
 client.on('clientReady', async () => { 
     console.log(`Bot is logged in as ${client.user.tag}!`);
 
-    // Define the slash command (NOW INCLUDES DURATION)
+    // Define the slash command (NOW ONLY REQUIRES TIME AND DURATION)
     const sessionBookCommand = new SlashCommandBuilder()
         .setName('sessionbook')
-        .setDescription('Books a new driving session and posts it to the current channel.')
-        .addStringOption(option =>
-            option.setName('title')
-                .setDescription('The title/location of the session (e.g., Highway Practice, City Driving)')
-                .setRequired(true))
+        .setDescription('Books a new driving session and posts it to the channel where this command is run.')
         .addStringOption(option =>
             option.setName('time')
                 .setDescription('The time and date of the session (e.g., 20:00 UTC, Today 3 PM PST)')
                 .setRequired(true))
-        .addStringOption(option => // NEW REQUIRED FIELD
+        .addStringOption(option => 
             option.setName('duration') 
                 .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
                 .setRequired(true));
