@@ -129,22 +129,26 @@ function parseTimeString(timeString) {
     
     // 3. Try parsing the date with the determined timezone
     for (const format of formats) {
-        // dayjs().tz(tz) sets the current time in that zone
-        let date = dayjs.tz(timeWithZone, format, tz);
-
-        // FIX: Check if the date is valid BEFORE applying relative time adjustments
-        // This prevents the RangeError that occurs when trying to modify an invalid date object.
-        if (date.isValid()) {
-            // Check for "tomorrow" or "today" keywords (relative time handling)
-            if (timeString.toLowerCase().includes('tomorrow')) {
-                date = date.add(1, 'day');
-            } else if (timeString.toLowerCase().includes('today')) {
-                // No need to add a day, just use the current day
+        try {
+            // FIX: Wrap dayjs.tz in try/catch to prevent the RangeError crash
+            let date = dayjs.tz(timeWithZone, format, tz);
+    
+            if (date.isValid()) {
+                // Check for "tomorrow" or "today" keywords (relative time handling)
+                if (timeString.toLowerCase().includes('tomorrow')) {
+                    date = date.add(1, 'day');
+                } else if (timeString.toLowerCase().includes('today')) {
+                    // No need to add a day, just use the current day
+                }
+                
+                // Discord requires the Unix timestamp (seconds since epoch), which is UTC.
+                return date.unix(); 
             }
-            
-            // Discord requires the Unix timestamp (seconds since epoch), which is UTC.
-            // .unix() returns seconds, which is what Discord expects for the <t:TIMESTAMP> format.
-            return date.unix(); 
+        } catch (e) {
+            // If the time value is invalid and crashes dayjs.tz, we catch it and continue to the next format.
+            // This prevents the bot from crashing entirely.
+            console.error(`Error parsing time string "${timeString}" with format "${format}" and timezone "${tz}":`, e.message);
+            continue; 
         }
     }
 
@@ -207,7 +211,7 @@ function createActionRow(session) {
         description: role.max > 0 ? `Max: ${role.max} | Current: ${role.current}` : `Current: ${role.current}`,
         // Disable the option if capacity is reached
         default: false,
-        disabled: role.max > 0 && role.current >= role.current
+        disabled: role.max > 0 && role.current >= role.max
     }));
 
     const selectMenu = new StringSelectMenuBuilder()
@@ -319,6 +323,7 @@ client.on('interactionCreate', async interaction => {
                 // Format the time using the Discord dynamic timestamp: <t:timestamp:F> (Full Date/Time)
                 displayTimeMessage = `✅ Time successfully converted! It will be shown to everyone in their local timezone.`;
             } else {
+                // This path is now taken if parsing fails, but the bot won't crash
                 displayTimeMessage = `⚠️ **Timezone Conversion Failed:** Could not reliably parse \`${timeString}\`. Displaying plain text time, which may confuse users in different timezones.`;
             }
 
@@ -432,6 +437,12 @@ client.on('interactionCreate', async interaction => {
 
     // --- Component (Button/Select Menu) Handling ---
     else if (interaction.isStringSelectMenu() || interaction.isButton()) {
+        // FIX: IMMEDIATELY DEFER THE UPDATE to prevent Unknown Interaction (10062) error
+        // Catch any error during defer (like the 10062) to prevent bot crash
+        await interaction.deferUpdate().catch(() => {
+            console.log('Interaction defer failed (likely expired). Skipping further processing.');
+        });
+        
         const customId = interaction.customId;
         // Correctly split the ID into two parts: action and session ID
         const parts = customId.split('_');
@@ -442,11 +453,11 @@ client.on('interactionCreate', async interaction => {
         const currentSession = currentSessions[sessionId];
 
         if (!currentSession) {
-            // FIX: Use deferUpdate() or deferReply() immediately to avoid the 10062 error
-            if (interaction.isMessageComponent()) {
-                await interaction.deferUpdate().catch(() => {}); // Safely defer to avoid crash
-            }
-            return interaction.reply({ content: '❌ This session is no longer active or the data was lost. Please ask a Host to create a new one.', ephemeral: true });
+            // Since we deferred the update, we now use followUp instead of reply
+            return interaction.followUp({ 
+                content: '❌ This session is no longer active or the data was lost. Please ask a Host to create a new one.', 
+                ephemeral: true 
+            });
         }
         
         const member = interaction.member;
@@ -466,7 +477,7 @@ client.on('interactionCreate', async interaction => {
         
         // --- Sign Up Action (Select Menu) ---
         if (action === 'signup' && interaction.isStringSelectMenu()) {
-            await interaction.deferReply({ ephemeral: true }); // Acknowledge immediately
+            // Deferred reply already done
 
             const roleToSignFor = interaction.values[0]; // e.g., 'driver', 'staff', 'trainee'
             const rosterCategory = roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
@@ -506,6 +517,7 @@ client.on('interactionCreate', async interaction => {
                 const messageChannel = await client.channels.fetch(currentSession.channelId);
                 const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
 
+                // Use editReply since we deferred update at the beginning
                 await messageToEdit.edit({ embeds: [updatedEmbed], components: updatedComponents });
 
                 await interaction.followUp({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!`, ephemeral: true });
@@ -518,7 +530,7 @@ client.on('interactionCreate', async interaction => {
         
         // --- Cancel Signup Action (Button) ---
         else if (action === 'cancel' && interaction.isButton()) {
-            await interaction.deferReply({ ephemeral: true }); // Acknowledge immediately
+            // Deferred reply already done
             
             const existingEntry = findRosterIndex(currentSession);
 
@@ -542,7 +554,7 @@ client.on('interactionCreate', async interaction => {
                 const messageChannel = await client.channels.fetch(currentSession.channelId);
                 const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
 
-                // Use the new components to ensure the Select Menu reflects available capacity correctly
+                // Use editReply since we deferred update at the beginning
                 await messageToEdit.edit({ embeds: [updatedEmbed], components: updatedComponents });
 
                 await interaction.followUp({ content: `✅ You have been successfully removed from the session roster.`, ephemeral: true });
