@@ -14,7 +14,6 @@ const {
     ButtonBuilder, 
     ButtonStyle, 
     PermissionsBitField, 
-    ChannelType, 
     MessageFlags // Used for ephemeral replacement
 } = require('discord.js');
 
@@ -77,7 +76,7 @@ function saveSessions(sessions) {
 
 /**
  * Creates the Discord embed for a session with the new layout, emojis, and fields.
- * Handles the time display to prevent giberish if the time string is invalid.
+ * Handles the time display to prevent "giberish" if the time string is invalid.
  * @param {Object} session The session data.
  * @param {string} hostTag The Discord tag of the host.
  * @returns {EmbedBuilder}
@@ -87,17 +86,17 @@ function createSessionEmbed(session, hostTag) {
     const staffCount = session.juniorstaff.length;
     const traineesCount = session.trainees.length;
 
-    // --- Time Display Logic ---
+    // --- Time Display Logic (Fixed NaN Issue) ---
     let timeDisplay = session.time;
     const parsedTime = Date.parse(session.time);
 
-    // Only use Discord's relative timestamp if the user input can be reliably parsed into a valid date.
-    if (!isNaN(parsedTime)) {
+    // Only use Discord's relative timestamp if the user input can be reliably parsed into a valid, non-zero date.
+    if (!isNaN(parsedTime) && parsedTime > 0) {
         const timestamp = Math.floor(parsedTime / 1000);
         // Display the exact time (f) and the relative time (R)
         timeDisplay = `<t:${timestamp}:f> (<t:${timestamp}:R>)`;
     } 
-    // If not parseable, timeDisplay remains the raw session.time string to avoid garbled output.
+    // If parsing fails (e.g., 'T' or '1 DAY'), timeDisplay remains the raw input string (session.time).
 
 
     const embed = new EmbedBuilder()
@@ -105,11 +104,11 @@ function createSessionEmbed(session, hostTag) {
         // New Title
         .setTitle('📢 This is a scheduled POP driving session. Sign up below! 🚗')
         .setDescription(
-            // Updated descriptive fields (Removed Location, as per user request)
+            // Only Host, Time, Duration, and Channel are displayed now.
             `**Host**\n<@${session.hostId}> (${hostTag})\n` +
             `**Time**\n${timeDisplay}\n` +
             `**Duration**\n${session.duration}\n` +
-            `**Channel**\n<#${session.channelId}>\n\n` + // Added channel where announcement was made
+            `**Channel**\n<#${session.channelId}>\n\n` +
             `**— — — Roster Signups — — —**`
         )
         .addFields(
@@ -212,7 +211,7 @@ async function handleButtonInteraction(interaction) {
         // Edit the original message to reflect closure and disable buttons
         const closeEmbed = new EmbedBuilder()
             .setColor(0xFF0000)
-            .setTitle(`Session Closed: ${currentSession.title || 'Driving Session'}`)
+            .setTitle(`Session Closed`)
             .setDescription(`The session hosted by <@${currentSession.hostId}> has been closed.`)
             .setTimestamp();
 
@@ -334,18 +333,16 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ content: '❌ You do not have permission to book a session.' });
             }
 
-            // --- 2. Gather Command Options ---
-            // Removed 'title' (Location) as requested.
+            // --- 2. Gather Command Options (Only Time and Duration) ---
             const time = options.getString('time');
             const duration = options.getString('duration');
             const channelId = interaction.channelId; 
             const hostId = member.id;
             
-            // --- 3. Create Session Data ---
+            // --- 3. Create Session Data (No more 'title' field) ---
             const sessionId = generateSessionId(channelId);
             const newSession = {
                 id: sessionId,
-                title: 'N/A', // Default title since it's no longer a required field
                 time: time,
                 duration: duration, 
                 channelId: channelId,
@@ -392,17 +389,16 @@ client.on('interactionCreate', async interaction => {
 
 // --- Slash Command Definition and Registration ---
 
-// Renamed from 'ready' to 'clientReady' to address the deprecation warning
 client.on('clientReady', async () => { 
     console.log(`Bot is logged in as ${client.user.tag}!`);
 
-    // Define the slash command (NOW ONLY REQUIRES TIME AND DURATION)
+    // Define the slash command (ONLY REQUIRES TIME AND DURATION)
     const sessionBookCommand = new SlashCommandBuilder()
         .setName('sessionbook')
         .setDescription('Books a new driving session and posts it to the channel where this command is run.')
         .addStringOption(option =>
             option.setName('time')
-                .setDescription('The time and date of the session (e.g., 20:00 UTC, Today 3 PM PST)')
+                .setDescription('The time and date of the session (e.g., 20:00 UTC, Today 3 PM PST, or just T)')
                 .setRequired(true))
         .addStringOption(option => 
             option.setName('duration') 
