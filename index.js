@@ -3,31 +3,12 @@
 // Load environment variables (like the BOT_TOKEN and Role IDs) from the .env file
 require('dotenv').config();
 const fs = require('fs');
-// Include the standard HTTP module needed for the Render web server
+// Include the standard HTTP module needed for the Replit web server
 const http = require('http'); 
-const { 
-    Client, 
-    GatewayIntentBits, 
-    SlashCommandBuilder, 
-    EmbedBuilder, 
-    ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle, 
-    ComponentType, 
-    PermissionsBitField, 
-    StringSelectMenuBuilder 
-} = require('discord.js');
-
-// Import dayjs and the advanced parsing plugins for natural language dates
-const dayjs = require('dayjs');
-const customParseFormat = require('dayjs/plugin/customParseFormat');
-const timezone = require('dayjs/plugin/timezone');
-const utc = require('dayjs/plugin/utc');
-dayjs.extend(customParseFormat);
-dayjs.extend(timezone);
-dayjs.extend(utc);
+const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, PermissionsBitField, StringSelectMenuBuilder } = require('discord.js');
 
 // --- Configuration Constants from .env ---
+// NOTE: These variables are loaded directly from the Canvas content you finalized.
 const TOKEN = process.env.BOT_TOKEN;
 const HOST_ID = process.env.SESSION_HOST_ID; 
 // JUNIOR_STAFF_IDS is read as a comma-separated string and split into an array.
@@ -41,542 +22,368 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers 
+        GatewayIntentBits.GuildMembers // Crucial for reading and checking user roles
     ]
 });
 
-// --- Utility Functions (File I/O and Date Parsing) ---
+// --- Utility Functions ---
 
-// Reads the sessions from the JSON file
+/**
+ * Creates a simple web server required by Render for monitoring uptime.
+ */
+function createWebServer() {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Bot is running and operational.');
+    });
+
+    const port = process.env.PORT || 10000;
+    server.listen(port, () => {
+        console.log(`Web server running on port ${port} (Required for Render uptime).`);
+    });
+}
+
+/**
+ * Loads session data from the persistent JSON file.
+ * @returns {object} The sessions object, or an empty object if file not found/invalid.
+ */
 function loadSessions() {
     try {
-        const data = fs.readFileSync(SESSIONS_FILE, 'utf8');
-        // Ensure the file content is parsed correctly. If the file is empty, return an empty object.
-        return JSON.parse(data) || {};
-    } catch (error) {
-        // If file doesn't exist or is invalid JSON (e.g., empty), start with an empty object.
-        if (error.code === 'ENOENT' || error instanceof SyntaxError) {
-            console.warn('Error reading sessions.json, returning empty object:', error.message);
-            // Initialize with valid JSON to prevent future errors
-            saveSessions({}); 
-            return {};
+        if (fs.existsSync(SESSIONS_FILE)) {
+            const data = fs.readFileSync(SESSIONS_FILE, 'utf8');
+            return JSON.parse(data);
         }
-        console.error('CRITICAL: Failed to load sessions:', error);
+        return {};
+    } catch (error) {
+        console.error('Error loading sessions:', error);
         return {};
     }
 }
 
-// Writes the current sessions state to the JSON file
+/**
+ * Saves session data to the persistent JSON file.
+ * @param {object} sessions The sessions object to save.
+ */
 function saveSessions(sessions) {
     try {
         fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
     } catch (error) {
-        console.error('CRITICAL: Failed to save sessions:', error);
+        console.error('Error saving sessions:', error);
     }
 }
 
 /**
- * Parses a user-provided time string into a valid Day.js object.
- * This is designed to handle common formats and assumes EST/EDT by default if no timezone is provided.
- * @param {string} timeString The time string from the user (e.g., "Saturday @ 3pm est" or "14/09/26 8pm").
- * @returns {dayjs.Dayjs | null} A Day.js object in UTC, or null if parsing failed.
+ * Creates a new session object.
+ * @param {string} channelId Discord channel ID where the session is hosted.
+ * @param {string} hostId Discord user ID of the session host.
+ * @param {string} startTime The planned start time of the session (raw string).
+ * @param {string} type The type of session (e.g., "POP").
+ * @returns {object} The new session object structure.
  */
-function parseTimeString(timeString) {
-    // 1. Define a list of common date formats to try
-    const formats = [
-        'YYYY-MM-DD h:mm A z', // 2026-09-14 8:00 PM EST
-        'MM/DD/YY h:mm A z',   // 09/14/26 8:00 PM EST
-        'D/M/YY h:mm A z',     // 14/9/26 8:00 PM EST
-        'dddd @ h:mm A z',     // Saturday @ 3:00 PM EST (Assumes current week's Saturday)
-        'h:mm A z'             // 8:00 PM EST (Assumes today)
-    ];
-
-    // 2. Normalize and attempt to find a timezone. Default to EST/EDT if none found.
-    const normalizedString = timeString.replace(/@/g, '').trim();
-    
-    let timeWithZone = normalizedString;
-    let tz = 'America/New_York'; // Default to EST/EDT
-
-    // Basic regex to find common timezone abbreviations (e.g., EST, PST, GMT, CDT)
-    const tzMatch = normalizedString.match(/\b(EST|EDT|PST|PDT|CST|CDT|MST|MDT|GMT|UTC)\b/i);
-
-    if (tzMatch) {
-        const matchedZone = tzMatch[1].toUpperCase();
-        timeWithZone = normalizedString.replace(tzMatch[0], '').trim(); // Remove the TZ from the string for parsing
-
-        switch (matchedZone) {
-            case 'PST':
-            case 'PDT':
-                tz = 'America/Los_Angeles';
-                break;
-            case 'CST':
-            case 'CDT':
-                tz = 'America/Chicago';
-                break;
-            case 'MST':
-            case 'MDT':
-                tz = 'America/Denver';
-                break;
-            case 'GMT':
-            case 'UTC':
-                tz = 'UTC';
-                break;
-            default: // EST/EDT (New York)
-                tz = 'America/New_York';
-                break;
-        }
-    }
-    
-    // 3. Try parsing the date with the determined timezone
-    for (const format of formats) {
-        try {
-            // FIX: Wrap dayjs.tz in try/catch to prevent the RangeError crash
-            let date = dayjs.tz(timeWithZone, format, tz);
-    
-            if (date.isValid()) {
-                // Check for "tomorrow" or "today" keywords (relative time handling)
-                if (timeString.toLowerCase().includes('tomorrow')) {
-                    date = date.add(1, 'day');
-                } else if (timeString.toLowerCase().includes('today')) {
-                    // No need to add a day, just use the current day
-                }
-                
-                // Discord requires the Unix timestamp (seconds since epoch), which is UTC.
-                return date.unix(); 
-            }
-        } catch (e) {
-            // If the time value is invalid and crashes dayjs.tz, we catch it and continue to the next format.
-            // This prevents the bot from crashing entirely.
-            console.error(`Error parsing time string "${timeString}" with format "${format}" and timezone "${tz}":`, e.message);
-            continue; 
-        }
-    }
-
-    // 4. If all explicit format parsing fails, return null
-    return null;
+function createNewSession(channelId, messageId, hostId, startTime, type) {
+    return {
+        hostId: hostId,
+        channelId: channelId,
+        messageId: messageId,
+        startTime: startTime, // Store the raw time string
+        type: type,
+        // CRITICAL: Initialize all roster categories as empty arrays to prevent 'Cannot read properties of undefined (reading 'push')'
+        drivers: [],
+        staff: [],
+        trainees: [],
+        status: 'open', // 'open', 'closed'
+        signupMessageId: null // Placeholder for future use, if signup is in a separate message
+    };
 }
 
-// --- Embed & Component Generators ---
-
 /**
- * Creates the standard session embed display.
- * @param {object} session The session data object.
- * @param {string} hostTag The Discord tag of the host.
- * @returns {EmbedBuilder} The Discord session embed.
+ * Creates the Discord Embed for a session message.
+ * @param {object} session The session data.
+ * @param {string} hostTag The host's Discord tag (Username#Discriminator).
+ * @returns {EmbedBuilder} The constructed Embed.
  */
 function createSessionEmbed(session, hostTag) {
-    const sessionTime = session.scheduledTimestamp 
-        ? `<t:${session.scheduledTimestamp}:F> (<t:${session.scheduledTimestamp}:R>)` // Dynamic Timestamp
-        : session.time; // Fallback to plain text if parsing failed
+    // UPDATED: Display the raw startTime string directly.
+    let description = `**Type:** ${session.type}\n**Start Time:** ${session.startTime} (Timezone is as specified by host)\n**Host:** ${hostTag}\n\n`;
 
-    const capacityDisplay = (roster, max) => {
-        if (max === 0) return `(${roster.length} signed up)`;
-        return `(${roster.length}/${max} signed up)`;
-    };
+    // Safely access roster arrays, defaulting to empty array if undefined
+    const drivers = session.drivers || [];
+    const staff = session.staff || [];
+    const trainees = session.trainees || [];
+    
+    const driversCount = drivers.length;
+    const staffCount = staff.length;
+    const traineesCount = trainees.length;
 
-    const rosters = [
-        `**Drivers** ${capacityDisplay(session.drivers, session.maxDrivers)}:\n${session.drivers.map(u => `> 👤 ${u.tag}`).join('\n') || '> No drivers signed up.'}`,
-        `**Staff** ${capacityDisplay(session.staff, session.maxStaff)}:\n${session.staff.map(u => `> 🛠️ ${u.tag}`).join('\n') || '> No staff signed up.'}`,
-        `**Trainees** ${capacityDisplay(session.trainees, session.maxTrainees)}:\n${session.trainees.map(u => `> 🎓 ${u.tag}`).join('\n') || '> No trainees signed up.'}`
-    ].join('\n\n');
+    const driversList = drivers.map(m => `<@${m.id}>`).join(', ');
+    const staffList = staff.map(m => `<@${m.id}>`).join(', ');
+    const traineesList = trainees.map(m => `<@${m.id}>`).join(', ');
+
+
+    description += `**Drivers (${driversCount}):** ${driversCount > 0 ? driversList : 'None'}\n`;
+    description += `**Staff (${staffCount}):** ${staffCount > 0 ? staffList : 'None'}\n`;
+    description += `**Trainees (${traineesCount}):** ${traineesCount > 0 ? traineesList : 'None'}\n`;
 
     return new EmbedBuilder()
-        .setColor(0x0099ff)
-        .setTitle(`POP DRIVING Training Session`)
-        .setDescription(`**Host:** ${hostTag}\n**Session Time:** ${sessionTime}\n**Session ID:** \`${session.id}\`\n\n---`)
-        .addFields({
-            name: 'Current Roster',
-            value: rosters,
-            inline: false
-        })
+        .setColor(session.status === 'open' ? 0x00FF00 : 0xFF0000) // Green for open, Red for closed
+        .setTitle(`POP Driving Session - ${session.type.toUpperCase()} - ${session.status.toUpperCase()}`)
+        .setDescription(description)
+        .setFooter({ text: `Session ID: ${session.messageId}` })
         .setTimestamp();
 }
 
 /**
- * Creates the action row with the sign-up select menu.
- * @param {object} session The session data object.
- * @returns {ActionRowBuilder[]} The array containing the Select Menu and Cancel Button rows.
+ * Creates the Action Row components (buttons) for the session message.
+ * @returns {ActionRowBuilder} The row of buttons.
  */
-function createActionRow(session) {
-    const roles = {
-        'driver': { label: 'Driver', emoji: '👤', value: 'driver', max: session.maxDrivers, current: session.drivers.length },
-        'staff': { label: 'Staff (Jr/Sr)', emoji: '🛠️', value: 'staff', max: session.maxStaff, current: session.staff.length },
-        'trainee': { label: 'Trainee', emoji: '🎓', value: 'trainee', max: session.maxTrainees, current: session.trainees.length },
-    };
+function createSessionButtons() {
+    const signupDriverButton = new ButtonBuilder()
+        .setCustomId('signup_driver')
+        .setLabel('Sign up as Driver')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('🚗');
 
-    const options = Object.values(roles).map(role => ({
-        label: role.label,
-        emoji: role.emoji,
-        value: role.value,
-        description: role.max > 0 ? `Max: ${role.max} | Current: ${role.current}` : `Current: ${role.current}`,
-        // Disable the option if capacity is reached
-        default: false,
-        disabled: role.max > 0 && role.current >= role.max
-    }));
+    const signupStaffButton = new ButtonBuilder()
+        .setCustomId('signup_staff')
+        .setLabel('Sign up as Staff')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('🛠️');
 
-    const selectMenu = new StringSelectMenuBuilder()
-        // FIX: Changed Custom ID structure to be just 'signup_SESSIONID' to ensure correct parsing
-        .setCustomId(`signup_${session.id}`)
-        .setPlaceholder('Choose your role to sign up...')
-        .addOptions(options);
+    const signupTraineeButton = new ButtonBuilder()
+        .setCustomId('signup_trainee')
+        .setLabel('Sign up as Trainee')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('👨‍🎓');
 
-    const selectRow = new ActionRowBuilder()
-        .addComponents(selectMenu);
+    const closeSessionButton = new ButtonBuilder()
+        .setCustomId('close_session')
+        .setLabel('Close Session')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('🔒');
 
-    const cancelButton = new ButtonBuilder()
-        .setCustomId(`cancel_${session.id}`)
-        .setLabel('Cancel Signup ✖️')
-        .setStyle(ButtonStyle.Danger);
-
-    const buttonRow = new ActionRowBuilder()
-        .addComponents(cancelButton);
-
-    return [selectRow, buttonRow];
+    return new ActionRowBuilder().addComponents(signupDriverButton, signupStaffButton, signupTraineeButton, closeSessionButton);
 }
 
+// --- Command Definitions ---
 
-// --- Discord Bot Logic ---
+const startSessionCommand = new SlashCommandBuilder()
+    .setName('startsession')
+    .setDescription('Starts a new POP Driving session and posts the signup message.')
+    .addStringOption(option =>
+        option.setName('time')
+            // UPDATED description to tell users the time is static
+            .setDescription('The start time of the session (e.g., "TOMORROW 6PM EST").')
+            .setRequired(true))
+    .addStringOption(option =>
+        option.setName('type')
+            .setDescription('The type of session (e.g., POP, JNR, MSTR).')
+            .setRequired(false))
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageChannels); // Example permission requirement
 
-client.on('ready', async () => {
+
+// --- Main Execution ---
+
+// Start the web server first
+createWebServer();
+
+client.on('clientReady', () => {
     console.log(`Bot is logged in as ${client.user.tag}!`);
 
-    // Define Slash Commands for immediate registration
-    const commands = [
-        new SlashCommandBuilder()
-            .setName('session-book')
-            .setDescription('Schedules a new POP DRIVING training session.')
-            .addStringOption(option =>
-                option.setName('time')
-                    .setDescription('The time and date (e.g., Saturday @ 3pm EST, tomorrow 6pm, 14/09/26 8pm).')
-                    .setRequired(true))
-            .addStringOption(option =>
-                option.setName('description')
-                    .setDescription('Optional description for the session.')
-                    .setRequired(false))
-            .addIntegerOption(option =>
-                option.setName('max_drivers')
-                    .setDescription('Set maximum driver capacity (0 for unlimited).')
-                    .setRequired(false))
-            .addIntegerOption(option =>
-                option.setName('max_staff')
-                    .setDescription('Set maximum staff capacity (0 for unlimited).')
-                    .setRequired(false))
-            .addIntegerOption(option =>
-                option.setName('max_trainees')
-                    .setDescription('Set maximum trainee capacity (0 for unlimited).')
-                    .setRequired(false)),
-
-        new SlashCommandBuilder()
-            .setName('session-end')
-            .setDescription('Ends an active session and archives the message.')
-            .addStringOption(option =>
-                option.setName('message_id')
-                    .setDescription('The ID or link of the session announcement message.')
-                    .setRequired(true))
-    ].map(command => command.toJSON());
-
-    // Register commands globally or guild-specific
-    try {
-        await client.application.commands.set(commands);
-        console.log('Slash commands registered successfully.');
-    } catch (error) {
-        console.error('Failed to register slash commands:', error);
-    }
+    // Register slash commands globally (or per-guild if preferred)
+    client.application.commands.set([startSessionCommand])
+        .then(() => console.log('Slash commands registered successfully.'))
+        .catch(console.error);
 });
-
-
-// --- Interaction Handling (Commands & Buttons/Select Menus) ---
 
 client.on('interactionCreate', async interaction => {
-    if (!interaction.guild) return;
-
-    // --- Command Handling ---
-    if (interaction.isChatInputCommand()) {
-        const { commandName } = interaction;
-
-        // --- /session-book command ---
-        if (commandName === 'session-book') {
-            await interaction.deferReply({ ephemeral: true });
-
-            const member = interaction.member;
-            
-            // Check for Host or Junior Staff Role
-            const isHost = member.roles.cache.has(HOST_ID);
-            const isJuniorStaff = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
-            
-            // Allow only specific roles to use this command
-            if (!isHost && !isJuniorStaff) {
-                return interaction.followUp({ content: '❌ You do not have permission to book a session.', ephemeral: true });
-            }
-
-            const timeString = interaction.options.getString('time');
-            const description = interaction.options.getString('description') || 'No description provided.';
-            const maxDrivers = interaction.options.getInteger('max_drivers') || 0;
-            const maxStaff = interaction.options.getInteger('max_staff') || 0;
-            const maxTrainees = interaction.options.getInteger('max_trainees') || 0;
-            
-            // Use the new parser to get the Unix timestamp
-            const scheduledTimestamp = parseTimeString(timeString);
-            
-            let displayTimeMessage;
-            if (scheduledTimestamp) {
-                // Format the time using the Discord dynamic timestamp: <t:timestamp:F> (Full Date/Time)
-                displayTimeMessage = `✅ Time successfully converted! It will be shown to everyone in their local timezone.`;
-            } else {
-                // This path is now taken if parsing fails, but the bot won't crash
-                displayTimeMessage = `⚠️ **Timezone Conversion Failed:** Could not reliably parse \`${timeString}\`. Displaying plain text time, which may confuse users in different timezones.`;
-            }
-
-            // Generate a unique ID for this session
-            const sessionId = interaction.id; 
-
-            // Create initial session data object
-            const sessionData = {
-                id: sessionId,
-                hostId: member.id,
-                channelId: interaction.channelId,
-                time: timeString, // Store original input for logging/reference
-                scheduledTimestamp: scheduledTimestamp, // Store the Unix timestamp
-                description: description,
-                maxDrivers: Math.max(0, maxDrivers),
-                maxStaff: Math.max(0, maxStaff),
-                maxTrainees: Math.max(0, maxTrainees),
-                drivers: [],
-                staff: [],
-                trainees: [],
-                status: 'active'
-            };
-
-            // Generate the initial embed and components
-            const embed = createSessionEmbed(sessionData, member.user.tag);
-            const components = createActionRow(sessionData);
-
-            try {
-                // Post the session announcement
-                const message = await interaction.channel.send({ embeds: [embed], components: components });
-                
-                // Save the message ID and update the data
-                sessionData.messageId = message.id;
-
-                const currentSessions = loadSessions();
-                currentSessions[sessionId] = sessionData;
-                saveSessions(currentSessions);
-
-                await interaction.followUp({ content: `✅ Session booked successfully! See the announcement above.\n\n${displayTimeMessage}`, ephemeral: true });
-
-            } catch (error) {
-                console.error('Error posting session announcement:', error);
-                await interaction.followUp({ content: '❌ Failed to book the session.', ephemeral: true });
-            }
+    if (interaction.isCommand()) {
+        if (interaction.commandName === 'startsession') {
+            await handleStartSessionCommand(interaction);
         }
-        
-        // --- /session-end command ---
-        else if (commandName === 'session-end') {
-             await interaction.deferReply({ ephemeral: true });
+    } else if (interaction.isButton()) {
+        await handleSessionButtonInteraction(interaction);
+    }
+});
 
-            const member = interaction.member;
+/**
+ * Handles the /startsession slash command.
+ */
+async function handleStartSessionCommand(interaction) {
+    await interaction.deferReply({ ephemeral: true });
 
-            // Check if the user is a Host or has permission to end sessions
-            const isHost = member.roles.cache.has(HOST_ID);
-            const isJuniorStaff = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
+    const member = interaction.guild.members.cache.get(interaction.user.id);
+    const hostRoleCheck = member.roles.cache.has(HOST_ID);
+    const juniorStaffCheck = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
 
-            if (!isHost && !isJuniorStaff) {
-                return interaction.followUp({ content: '❌ You do not have permission to end a session.', ephemeral: true });
-            }
-
-            const messageIdOrLink = interaction.options.getString('message_id');
-            // Attempt to extract the ID from a link if provided
-            const messageIdMatch = messageIdOrLink.match(/(\d+)$/);
-            const targetMessageId = messageIdMatch ? messageIdMatch[1] : messageIdOrLink;
-            
-            const currentSessions = loadSessions();
-            let sessionToDeleteId = null;
-            let targetSession = null;
-
-            // Find the session ID linked to this message ID
-            for (const id in currentSessions) {
-                if (currentSessions[id].messageId === targetMessageId) {
-                    sessionToDeleteId = id;
-                    targetSession = currentSessions[id];
-                    break;
-                }
-            }
-
-            if (!sessionToDeleteId) {
-                 return interaction.followUp({ content: '❌ Session not found. Please ensure the message ID or link is correct and the session is active.', ephemeral: true });
-            }
-
-            try {
-                const channel = await client.channels.fetch(targetSession.channelId);
-                const message = await channel.messages.fetch(targetMessageId);
-
-                // Archive the embed
-                const hostTag = await client.users.fetch(targetSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-                const archivedEmbed = createSessionEmbed(targetSession, hostTag)
-                    .setColor(0x808080)
-                    .setTitle(`[ARCHIVED] POP DRIVING Training Session`)
-                    .setDescription(`**This session has concluded and the roster is finalized.**\n\n**Host:** ${hostTag}\n**Original Time:** ${targetSession.time}\n**Session ID:** \`${targetSession.id}\`\n\n---`)
-                    .setTimestamp(new Date()); 
-
-                // Edit the message to remove interactive components and show the archived embed
-                await message.edit({ embeds: [archivedEmbed], components: [] });
-
-                // Delete the session from storage
-                delete currentSessions[sessionToDeleteId];
-                saveSessions(currentSessions);
-
-                await interaction.followUp({ content: `✅ Session with ID \`${targetSession.id}\` successfully ended and archived.`, ephemeral: true });
-
-            } catch (error) {
-                console.error('Error ending session:', error);
-                await interaction.followUp({ content: '❌ Failed to end the session. Check bot permissions or verify the message ID/link.', ephemeral: true });
-            }
-        }
+    // Check if the user is authorized to start a session
+    if (!hostRoleCheck && !juniorStaffCheck && interaction.user.id !== interaction.guild.ownerId) {
+        return interaction.followUp({ content: '❌ You do not have permission to start a driving session.', ephemeral: true });
     }
 
+    const startTime = interaction.options.getString('time');
+    const sessionType = interaction.options.getString('type') || 'POP';
+    const hostId = interaction.user.id;
+    const channelId = interaction.channelId;
+    let currentSessions = loadSessions();
+    const sessionId = interaction.id; // Using the interaction ID as a unique session ID for simplicity
 
-    // --- Component (Button/Select Menu) Handling ---
-    else if (interaction.isStringSelectMenu() || interaction.isButton()) {
-        // FIX: IMMEDIATELY DEFER THE UPDATE to prevent Unknown Interaction (10062) error
-        // Catch any error during defer (like the 10062) to prevent bot crash
-        await interaction.deferUpdate().catch(() => {
-            console.log('Interaction defer failed (likely expired). Skipping further processing.');
+    try {
+        // Create the initial session data and components
+        const hostTag = interaction.user.tag;
+        // Use the raw time string directly
+        const initialSessionData = createNewSession(channelId, 'temp', hostId, startTime, sessionType); // 'temp' messageId
+        const initialEmbed = createSessionEmbed(initialSessionData, hostTag);
+        const buttons = createSessionButtons();
+
+        // Send the message
+        const message = await interaction.channel.send({
+            embeds: [initialEmbed],
+            components: [buttons]
         });
+
+        // Update the session data with the final messageId
+        initialSessionData.messageId = message.id;
+
+        // Save the new session
+        currentSessions[sessionId] = initialSessionData;
+        saveSessions(currentSessions);
+
+        await interaction.followUp({ content: `✅ POP Driving Session started successfully! Time is displayed exactly as you typed it.`, ephemeral: true });
+
+    } catch (error) {
+        console.error('Error starting session:', error);
+        await interaction.followUp({ content: '❌ Failed to start the session. Check bot permissions.', ephemeral: true });
+    }
+}
+
+/**
+ * Handles button interactions for session signups and closing.
+ */
+async function handleSessionButtonInteraction(interaction) {
+    if (!interaction.customId.startsWith('signup_') && interaction.customId !== 'close_session') return;
+
+    // Use deferReply with ephemeral set to false for messages that should be public,
+    // but since this is an interaction update, deferUpdate is correct for buttons.
+    await interaction.deferUpdate(); 
+
+    // Find the session associated with the message the button was clicked on
+    let currentSessions = loadSessions();
+    const sessionId = Object.keys(currentSessions).find(key => currentSessions[key].messageId === interaction.message.id);
+
+    if (!sessionId) {
+        // Use followUp here since the deferUpdate was used above.
+        return interaction.followUp({ content: '❌ Could not find an active session associated with this message.', ephemeral: true });
+    }
+
+    let currentSession = currentSessions[sessionId];
+
+    if (interaction.customId === 'close_session') {
+        // --- Handle Close Session ---
+        // Check if the user is the host or an authorized staff member
+        const member = interaction.guild.members.cache.get(interaction.user.id);
+        const hostCheck = interaction.user.id === currentSession.hostId;
+        const juniorStaffCheck = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
+        const ownerCheck = interaction.user.id === interaction.guild.ownerId;
+
+        if (!hostCheck && !juniorStaffCheck && !ownerCheck) {
+            return interaction.followUp({ content: '❌ Only the session host or authorized staff can close this session.', ephemeral: true });
+        }
+
+        // Update session status and remove components
+        currentSession.status = 'closed';
+        currentSessions[sessionId] = currentSession;
+        saveSessions(currentSessions);
+
+        const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
+        const updatedEmbed = createSessionEmbed(currentSession, hostTag);
+
+        try {
+            await interaction.editReply({ embeds: [updatedEmbed], components: [] }); // Remove buttons
+            await interaction.followUp({ content: `✅ Session successfully closed by <@${interaction.user.id}>.`, ephemeral: false });
+        } catch (error) {
+            console.error('Error closing session:', error);
+            await interaction.followUp({ content: '❌ Failed to close the session and update the message.', ephemeral: true });
+        }
+
+    } else if (interaction.customId.startsWith('signup_')) {
+        // --- Handle Sign-up ---
+        if (currentSession.status !== 'open') {
+            return interaction.followUp({ content: '❌ This session is already closed for signups.', ephemeral: true });
+        }
+
+        const customId = interaction.customId; // e.g., 'signup_driver'
+        const roleToSignFor = customId.split('_')[1]; // 'driver', 'staff', or 'trainee'
+        const member = interaction.guild.members.cache.get(interaction.user.id);
+
+        // --- 1. Role Check ---
+        let roleName = null;
+        if (roleToSignFor === 'driver') {
+            // Drivers are assumed to be open to everyone, no role check needed.
+            roleName = 'Driver';
+        } else if (roleToSignFor === 'staff') {
+            const hasStaffRole = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id)) || member.roles.cache.has(HOST_ID);
+            if (!hasStaffRole) {
+                return interaction.followUp({ content: '❌ You must be a Staff or Session Host to sign up as Staff.', ephemeral: true });
+            }
+            roleName = 'Staff';
+        } else if (roleToSignFor === 'trainee') {
+            const hasTraineeRole = member.roles.cache.has(TRAINEE_ID);
+            if (!hasTraineeRole) {
+                return interaction.followUp({ content: '❌ You must have the Trainee role to sign up as a Trainee.', ephemeral: true });
+            }
+            roleName = 'Trainee';
+        }
+
+        // --- 2. Check for Duplicate Signups ---
+        const allRosterCategories = ['drivers', 'staff', 'trainees'];
         
-        const customId = interaction.customId;
-        // Correctly split the ID into two parts: action and session ID
-        const parts = customId.split('_');
-        const action = parts[0];
-        const sessionId = parts[1]; // Now reliably the session ID
+        // Ensure the categories exist for safe reading, which is good defensive programming practice
+        const isAlreadySignedUp = allRosterCategories.some(category =>
+            (currentSession[category] || []).some(m => m.id === interaction.user.id)
+        );
 
-        const currentSessions = loadSessions();
-        const currentSession = currentSessions[sessionId];
+        if (isAlreadySignedUp) {
+            return interaction.followUp({ content: `⚠️ You are already signed up for this session in another role.`, ephemeral: true });
+        }
 
-        if (!currentSession) {
-            // Since we deferred the update, we now use followUp instead of reply
-            return interaction.followUp({ 
-                content: '❌ This session is no longer active or the data was lost. Please ask a Host to create a new one.', 
-                ephemeral: true 
-            });
+        // --- 4. Add the Member to the Session Roster ---
+        // Determine the correct category in the roster (e.g., 'driver' -> 'drivers')
+        const rosterCategory = roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
+        
+        // Initialize the array if it is missing or not an array.
+        if (!currentSession[rosterCategory] || !Array.isArray(currentSession[rosterCategory])) {
+            console.warn(`Roster category '${rosterCategory}' missing or invalid in session ${sessionId}. Initializing as empty array.`);
+            currentSession[rosterCategory] = []; 
         }
         
-        const member = interaction.member;
-        const userId = member.id;
+        currentSession[rosterCategory].push({ id: member.id, tag: member.user.tag });
 
-        // Helper to find existing role index
-        const findRosterIndex = (session) => {
-            const rosterCategories = ['drivers', 'staff', 'trainees'];
-            for (const category of rosterCategories) {
-                const index = session[category].findIndex(u => u.id === userId);
-                if (index !== -1) {
-                    return { category, index };
-                }
-            }
-            return null; // User not found in any roster
-        };
-        
-        // --- Sign Up Action (Select Menu) ---
-        if (action === 'signup' && interaction.isStringSelectMenu()) {
-            // Deferred reply already done
+        // Update the data store
+        currentSessions[sessionId] = currentSession;
+        saveSessions(currentSessions);
 
-            const roleToSignFor = interaction.values[0]; // e.g., 'driver', 'staff', 'trainee'
-            const rosterCategory = roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
-            
-            // 1. Check if user is already signed up
-            const existingEntry = findRosterIndex(currentSession);
-            if (existingEntry) {
-                // If they are signed up, move them (remove from old, add to new)
-                if (existingEntry.category === rosterCategory) {
-                    return interaction.followUp({ content: `✅ You are already signed up as **${roleToSignFor.toUpperCase()}**.`, ephemeral: true });
-                }
-                
-                // If moving roles, remove from the old roster first
-                currentSession[existingEntry.category].splice(existingEntry.index, 1);
-            }
+        // --- 5. Update the Message Embed ---
+        const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
+        const updatedEmbed = createSessionEmbed(currentSession, hostTag);
 
-            // 2. Check Capacity
-            const maxCapacity = currentSession[`max${roleToSignFor.charAt(0).toUpperCase() + roleToSignFor.slice(1)}s`];
-            if (maxCapacity > 0 && currentSession[rosterCategory].length >= maxCapacity) {
-                 // Revert the select menu change visually by editing the message without changing the selection
-                return interaction.followUp({ content: `❌ The **${roleToSignFor.toUpperCase()}** roster is currently full (${maxCapacity}/${maxCapacity}). Please choose another role or try again later.`, ephemeral: true });
-            }
+        try {
+            // Find the original message and update the embed with the new roster
+            const messageChannel = await client.channels.fetch(currentSession.channelId);
+            const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
 
-            // 3. Add to the new roster
-            currentSession[rosterCategory].push({ id: member.id, tag: member.user.tag });
+            // Fetch the current components (buttons/menu) to ensure they persist
+            const existingComponents = messageToEdit.components;
 
-            // 4. Update the data store
-            currentSessions[sessionId] = currentSession;
-            saveSessions(currentSessions);
+            await messageToEdit.edit({ embeds: [updatedEmbed], components: existingComponents });
 
-            // 5. Update the Message Embed and Components
-            const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-            const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-            const updatedComponents = createActionRow(currentSession); // Rebuild components to update disabled state
+            await interaction.followUp({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!`, ephemeral: true });
 
-            try {
-                const messageChannel = await client.channels.fetch(currentSession.channelId);
-                const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
-
-                // Use editReply since we deferred update at the beginning
-                await messageToEdit.edit({ embeds: [updatedEmbed], components: updatedComponents });
-
-                await interaction.followUp({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!`, ephemeral: true });
-
-            } catch (error) {
-                console.error('Error signing up and updating message:', error);
-                await interaction.followUp({ content: '❌ Failed to update the session roster. Please try again.', ephemeral: true });
-            }
-        }
-        
-        // --- Cancel Signup Action (Button) ---
-        else if (action === 'cancel' && interaction.isButton()) {
-            // Deferred reply already done
-            
-            const existingEntry = findRosterIndex(currentSession);
-
-            if (!existingEntry) {
-                 return interaction.followUp({ content: '❌ You are not currently signed up for this session.', ephemeral: true });
-            }
-
-            // 1. Remove user from the roster
-            currentSession[existingEntry.category].splice(existingEntry.index, 1);
-
-            // 2. Update the data store
-            currentSessions[sessionId] = currentSession;
-            saveSessions(currentSessions);
-
-            // 3. Update the Message Embed and Components
-            const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-            const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-            const updatedComponents = createActionRow(currentSession); // Rebuild components to update disabled state
-
-            try {
-                const messageChannel = await client.channels.fetch(currentSession.channelId);
-                const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
-
-                // Use editReply since we deferred update at the beginning
-                await messageToEdit.edit({ embeds: [updatedEmbed], components: updatedComponents });
-
-                await interaction.followUp({ content: `✅ You have been successfully removed from the session roster.`, ephemeral: true });
-            } catch (error) {
-                console.error('Error cancelling signup and updating message:', error);
-                await interaction.followUp({ content: '❌ Failed to cancel your signup. Please try again.', ephemeral: true });
-            }
+        } catch (error) {
+            console.error('Error signing up and updating message:', error);
+            await interaction.followUp({ content: '❌ Failed to update the session roster. Please try again.', ephemeral: true });
         }
     }
-});
-
-
-// --- Web Server for Render Uptime ---
-// This simple web server must run to prevent the Render Free Web Service from sleeping.
-const port = process.env.PORT || 3000;
-http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('POP DRIVING Bot is running!\n');
-}).listen(port, () => {
-    console.log(`Web server running on port ${port} (Required for Render uptime).`);
-});
-
+}
 
 // Log the bot in
 client.login(TOKEN);

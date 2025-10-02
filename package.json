@@ -12,6 +12,5 @@
   "dependencies": {
     "discord.js": "^14.22.1",
     "dotenv": "^17.2.3",
-    "dayjs": "^1.11.11"
   }
 }
