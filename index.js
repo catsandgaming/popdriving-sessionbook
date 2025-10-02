@@ -3,12 +3,31 @@
 // Load environment variables (like the BOT_TOKEN and Role IDs) from the .env file
 require('dotenv').config();
 const fs = require('fs');
-// Include the standard HTTP module needed for the Replit web server
+// Include the standard HTTP module needed for the Render web server
 const http = require('http'); 
-const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, PermissionsBitField, StringSelectMenuBuilder } = require('discord.js');
+const { 
+    Client, 
+    GatewayIntentBits, 
+    SlashCommandBuilder, 
+    EmbedBuilder, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle, 
+    ComponentType, 
+    PermissionsBitField, 
+    StringSelectMenuBuilder 
+} = require('discord.js');
+
+// Import dayjs and the advanced parsing plugins for natural language dates
+const dayjs = require('dayjs');
+const customParseFormat = require('dayjs/plugin/customParseFormat');
+const timezone = require('dayjs/plugin/timezone');
+const utc = require('dayjs/plugin/utc');
+dayjs.extend(customParseFormat);
+dayjs.extend(timezone);
+dayjs.extend(utc);
 
 // --- Configuration Constants from .env ---
-// NOTE: These variables are loaded directly from the Canvas content you finalized.
 const TOKEN = process.env.BOT_TOKEN;
 const HOST_ID = process.env.SESSION_HOST_ID; 
 // JUNIOR_STAFF_IDS is read as a comma-separated string and split into an array.
@@ -22,355 +41,519 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers // Crucial for reading and checking user roles
+        GatewayIntentBits.GuildMembers 
     ]
 });
 
-// --- Utility Functions ---
+// --- Utility Functions (File I/O and Date Parsing) ---
 
-/** Reads session data from the JSON file. */
-function getSessions() {
+// Reads the sessions from the JSON file
+function loadSessions() {
     try {
-        // Read the file synchronously and parse it as JSON
-        const data = fs.readFileSync(SESSIONS_FILE);
-        return JSON.parse(data);
+        const data = fs.readFileSync(SESSIONS_FILE, 'utf8');
+        // Ensure the file content is parsed correctly. If the file is empty, return an empty object.
+        return JSON.parse(data) || {};
     } catch (error) {
-        // If the file is missing or invalid, return an empty object to start fresh
-        if (error.code === 'ENOENT') {
-            console.log('sessions.json not found, starting fresh.');
-        } else {
-            console.error('Error reading sessions.json, returning empty object:', error.message);
+        // If file doesn't exist or is invalid JSON (e.g., empty), start with an empty object.
+        if (error.code === 'ENOENT' || error instanceof SyntaxError) {
+            console.warn('Error reading sessions.json, returning empty object:', error.message);
+            // Initialize with valid JSON to prevent future errors
+            saveSessions({}); 
+            return {};
         }
-        return {}; 
+        console.error('CRITICAL: Failed to load sessions:', error);
+        return {};
     }
 }
 
-/** Writes session data to the JSON file. */
+// Writes the current sessions state to the JSON file
 function saveSessions(sessions) {
     try {
-        // Write the JavaScript object back to the JSON file, formatted nicely (2 spaces)
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
     } catch (error) {
-        console.error('Error writing to sessions.json:', error.message);
+        console.error('CRITICAL: Failed to save sessions:', error);
     }
 }
 
 /**
- * Creates the dynamic session embed based on current roster data.
- * @param {object} sessionData - The stored session information.
- * @param {string} hostTag - The Discord tag of the host.
- * @returns {EmbedBuilder} The constructed embed.
+ * Parses a user-provided time string into a valid Day.js object.
+ * This is designed to handle common formats and assumes EST/EDT by default if no timezone is provided.
+ * @param {string} timeString The time string from the user (e.g., "Saturday @ 3pm est" or "14/09/26 8pm").
+ * @returns {dayjs.Dayjs | null} A Day.js object in UTC, or null if parsing failed.
  */
-function createSessionEmbed(sessionData, hostTag) {
-    const { time, duration, location, ...roster } = sessionData;
+function parseTimeString(timeString) {
+    // 1. Define a list of common date formats to try
+    const formats = [
+        'YYYY-MM-DD h:mm A z', // 2026-09-14 8:00 PM EST
+        'MM/DD/YY h:mm A z',   // 09/14/26 8:00 PM EST
+        'D/M/YY h:mm A z',     // 14/9/26 8:00 PM EST
+        'dddd @ h:mm A z',     // Saturday @ 3:00 PM EST (Assumes current week's Saturday)
+        'h:mm A z'             // 8:00 PM EST (Assumes today)
+    ];
 
-    // Helper to format the list of users in a category
-    const formatRosterList = (users, category) => {
-        if (!users || users.length === 0) {
-            // Display a fun placeholder if no one has signed up for that category yet
-            return `*No ${category} signed up yet!*`;
+    // 2. Normalize and attempt to find a timezone. Default to EST/EDT if none found.
+    const normalizedString = timeString.replace(/@/g, '').trim();
+    
+    let timeWithZone = normalizedString;
+    let tz = 'America/New_York'; // Default to EST/EDT
+
+    // Basic regex to find common timezone abbreviations (e.g., EST, PST, GMT, CDT)
+    const tzMatch = normalizedString.match(/\b(EST|EDT|PST|PDT|CST|CDT|MST|MDT|GMT|UTC)\b/i);
+
+    if (tzMatch) {
+        const matchedZone = tzMatch[1].toUpperCase();
+        timeWithZone = normalizedString.replace(tzMatch[0], '').trim(); // Remove the TZ from the string for parsing
+
+        switch (matchedZone) {
+            case 'PST':
+            case 'PDT':
+                tz = 'America/Los_Angeles';
+                break;
+            case 'CST':
+            case 'CDT':
+                tz = 'America/Chicago';
+                break;
+            case 'MST':
+            case 'MDT':
+                tz = 'America/Denver';
+                break;
+            case 'GMT':
+            case 'UTC':
+                tz = 'UTC';
+                break;
+            default: // EST/EDT (New York)
+                tz = 'America/New_York';
+                break;
         }
-        return users.map(user => `- <@${user.id}>`).join('\n');
+    }
+    
+    // 3. Try parsing the date with the determined timezone
+    for (const format of formats) {
+        // dayjs().tz(tz) sets the current time in that zone
+        let date = dayjs.tz(timeWithZone, format, tz);
+
+        // Check for "tomorrow" or "today" keywords (relative time handling)
+        if (timeString.toLowerCase().includes('tomorrow')) {
+            date = date.add(1, 'day');
+        } else if (timeString.toLowerCase().includes('today')) {
+            // No need to add a day, just use the current day
+        }
+
+        if (date.isValid()) {
+            // Discord requires the Unix timestamp (seconds since epoch), which is UTC.
+            // .unix() returns seconds, which is what Discord expects for the <t:TIMESTAMP> format.
+            return date.unix(); 
+        }
+    }
+
+    // 4. If all explicit format parsing fails, return null
+    return null;
+}
+
+// --- Embed & Component Generators ---
+
+/**
+ * Creates the standard session embed display.
+ * @param {object} session The session data object.
+ * @param {string} hostTag The Discord tag of the host.
+ * @returns {EmbedBuilder} The Discord session embed.
+ */
+function createSessionEmbed(session, hostTag) {
+    const sessionTime = session.scheduledTimestamp 
+        ? `<t:${session.scheduledTimestamp}:F> (<t:${session.scheduledTimestamp}:R>)` // Dynamic Timestamp
+        : session.time; // Fallback to plain text if parsing failed
+
+    const capacityDisplay = (roster, max) => {
+        if (max === 0) return `(${roster.length} signed up)`;
+        return `(${roster.length}/${max} signed up)`;
     };
 
-    // Filter out the non-roster properties to get just the signup lists
-    const driverList = formatRosterList(roster.drivers, 'Drivers');
-    const staffList = formatRosterList(roster.staff, 'Staff');
-    const traineeList = formatRosterList(roster.trainees, 'Trainees');
+    const rosters = [
+        `**Drivers** ${capacityDisplay(session.drivers, session.maxDrivers)}:\n${session.drivers.map(u => `> 👤 ${u.tag}`).join('\n') || '> No drivers signed up.'}`,
+        `**Staff** ${capacityDisplay(session.staff, session.maxStaff)}:\n${session.staff.map(u => `> 🛠️ ${u.tag}`).join('\n') || '> No staff signed up.'}`,
+        `**Trainees** ${capacityDisplay(session.trainees, session.maxTrainees)}:\n${session.trainees.map(u => `> 🎓 ${u.tag}`).join('\n') || '> No trainees signed up.'}`
+    ].join('\n\n');
 
     return new EmbedBuilder()
-        .setColor(0x0099ff) // A nice blue color
-        .setTitle('POP DRIVING Official Training Session!')
-        .setDescription(`A new driving session has been scheduled by **${hostTag}**. Click the button to secure your spot!`)
-        .addFields(
-            { name: '📅 Time', value: time, inline: true },
-            { name: '⏱️ Duration', value: duration, inline: true },
-            { name: '📍 Location', value: location, inline: true },
-            { name: '\u200b', value: '\u200b', inline: false }, // Zero-width space for spacing
-
-            { name: `🚗 Drivers Roster (${roster.drivers.length})`, value: driverList, inline: false },
-            { name: `🛠️ Staff Roster (${roster.staff.length})`, value: staffList, inline: true },
-            { name: `🎓 Trainee Roster (${roster.trainees.length})`, value: traineeList, inline: true }
-        )
-        .setFooter({ text: 'Use /session-end to archive this session after it concludes.' })
+        .setColor(0x0099ff)
+        .setTitle(`POP DRIVING Training Session`)
+        .setDescription(`**Host:** ${hostTag}\n**Session Time:** ${sessionTime}\n**Session ID:** \`${session.id}\`\n\n---`)
+        .addFields({
+            name: 'Current Roster',
+            value: rosters,
+            inline: false
+        })
         .setTimestamp();
 }
 
 /**
- * Removes a user from all roster categories.
- * @param {object} session - The current session object including roster arrays.
- * @param {string} userId - ID of the user to remove.
- * @returns {object} The updated session object.
+ * Creates the action row with the sign-up select menu.
+ * @param {object} session The session data object.
+ * @returns {ActionRowBuilder} The row containing the Select Menu and Cancel Button.
  */
-function removeUserFromRoster(session, userId) {
-    const categories = ['drivers', 'staff', 'trainees'];
-    for (const category of categories) {
-        if (Array.isArray(session[category])) {
-            session[category] = session[category].filter(user => user.id !== userId);
-        }
-    }
-    return session;
+function createActionRow(session) {
+    const roles = {
+        'driver': { label: 'Driver', emoji: '👤', value: 'driver', max: session.maxDrivers, current: session.drivers.length },
+        'staff': { label: 'Staff (Jr/Sr)', emoji: '🛠️', value: 'staff', max: session.maxStaff, current: session.staff.length },
+        'trainee': { label: 'Trainee', emoji: '🎓', value: 'trainee', max: session.maxTrainees, current: session.trainees.length },
+    };
+
+    const options = Object.values(roles).map(role => ({
+        label: role.label,
+        emoji: role.emoji,
+        value: role.value,
+        description: role.max > 0 ? `Max: ${role.max} | Current: ${role.current}` : `Current: ${role.current}`,
+        // Disable the option if capacity is reached
+        default: false,
+        disabled: role.max > 0 && role.current >= role.max
+    }));
+
+    const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`signup_select_${session.id}`)
+        .setPlaceholder('Choose your role to sign up...')
+        .addOptions(options);
+
+    const selectRow = new ActionRowBuilder()
+        .addComponents(selectMenu);
+
+    const cancelButton = new ButtonBuilder()
+        .setCustomId(`cancel_${session.id}`)
+        .setLabel('Cancel Signup ✖️')
+        .setStyle(ButtonStyle.Danger);
+
+    const buttonRow = new ActionRowBuilder()
+        .addComponents(cancelButton);
+
+    return [selectRow, buttonRow];
 }
 
-// --- Bot Ready Event ---
+
+// --- Discord Bot Logic ---
+
 client.on('ready', async () => {
     console.log(`Bot is logged in as ${client.user.tag}!`);
 
-    // --- Slash Command Registration ---
-    // Define the /session-book command structure
+    // Define Slash Commands for immediate registration
     const commands = [
         new SlashCommandBuilder()
             .setName('session-book')
-            .setDescription('Books a new driving session and creates the signup post.')
+            .setDescription('Schedules a new POP DRIVING training session.')
             .addStringOption(option =>
                 option.setName('time')
-                    .setDescription('The date and time of the session (e.g., Saturday @ 8 PM EST)')
+                    .setDescription('The time and date (e.g., Saturday @ 3pm EST, tomorrow 6pm, 14/09/26 8pm).')
                     .setRequired(true))
             .addStringOption(option =>
-                option.setName('duration')
-                    .setDescription('The estimated duration (e.g., 1 hour)')
-                    .setRequired(true))
+                option.setName('description')
+                    .setDescription('Optional description for the session.')
+                    .setRequired(false))
+            .addIntegerOption(option =>
+                option.setName('max_drivers')
+                    .setDescription('Set maximum driver capacity (0 for unlimited).')
+                    .setRequired(false))
+            .addIntegerOption(option =>
+                option.setName('max_staff')
+                    .setDescription('Set maximum staff capacity (0 for unlimited).')
+                    .setRequired(false))
+            .addIntegerOption(option =>
+                option.setName('max_trainees')
+                    .setDescription('Set maximum trainee capacity (0 for unlimited).')
+                    .setRequired(false)),
+
+        new SlashCommandBuilder()
+            .setName('session-end')
+            .setDescription('Ends an active session and archives the message.')
             .addStringOption(option =>
-                option.setName('location')
-                    .setDescription('The server/game location (e.g., Private Server #1)')
+                option.setName('message_id')
+                    .setDescription('The ID or link of the session announcement message.')
                     .setRequired(true))
-            .addChannelOption(option =>
-                option.setName('channel')
-                    .setDescription('The channel where the announcement should be posted')
-                    .setRequired(true)),
     ].map(command => command.toJSON());
 
+    // Register commands globally or guild-specific
     try {
-        // Register commands globally so they appear in Discord
         await client.application.commands.set(commands);
         console.log('Slash commands registered successfully.');
     } catch (error) {
         console.error('Failed to register slash commands:', error);
     }
-    
-    // --- START WEB SERVER FOR REPLIT UPTIME (NEW CODE) ---
-    // Replit requires a running web server process to keep the project active.
-    const server = http.createServer((req, res) => {
-        // This is the endpoint the pinger service will hit every few minutes
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('POP DRIVING Bot is running!');
-    });
-
-    // Replit automatically sets the PORT environment variable
-    const port = process.env.PORT || 3000;
-    server.listen(port, () => {
-        console.log(`Web server running on port ${port} (Required for Replit uptime).`);
-    });
 });
 
-// --- Command Handling (/session-book) ---
+
+// --- Interaction Handling (Commands & Buttons/Select Menus) ---
+
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isCommand()) return;
+    if (!interaction.guild) return;
 
-    if (interaction.commandName === 'session-book') {
-        // --- 1. Permission Check for Session Host ---
-        const member = interaction.member;
-        if (!member.roles.cache.has(HOST_ID)) {
-            return interaction.reply({ 
-                content: `❌ **Permission Denied!** You must have the <@&${HOST_ID}> role to book a session.`, 
-                ephemeral: true 
-            });
-        }
+    // --- Command Handling ---
+    if (interaction.isChatInputCommand()) {
+        const { commandName } = interaction;
 
-        await interaction.deferReply({ ephemeral: true });
+        // --- /session-book command ---
+        if (commandName === 'session-book') {
+            await interaction.deferReply({ ephemeral: true });
 
-        // Get command options
-        const time = interaction.options.getString('time');
-        const duration = interaction.options.getString('duration');
-        const location = interaction.options.getString('location');
-        const announcementChannel = interaction.options.getChannel('channel');
+            const member = interaction.member;
+            
+            // Check for Host or Junior Staff Role
+            const isHost = member.roles.cache.has(HOST_ID);
+            const isJuniorStaff = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
+            
+            // Allow only specific roles to use this command
+            if (!isHost && !isJuniorStaff) {
+                return interaction.followUp({ content: '❌ You do not have permission to book a session.', ephemeral: true });
+            }
 
-        if (!announcementChannel || announcementChannel.type !== 0) { // 0 is GuildText
-             return interaction.editReply({ content: '❌ Please select a valid text channel for the announcement.' });
+            const timeString = interaction.options.getString('time');
+            const description = interaction.options.getString('description') || 'No description provided.';
+            const maxDrivers = interaction.options.getInteger('max_drivers') || 0;
+            const maxStaff = interaction.options.getInteger('max_staff') || 0;
+            const maxTrainees = interaction.options.getInteger('max_trainees') || 0;
+            
+            // Use the new parser to get the Unix timestamp
+            const scheduledTimestamp = parseTimeString(timeString);
+            
+            let displayTimeMessage;
+            if (scheduledTimestamp) {
+                // Format the time using the Discord dynamic timestamp: <t:timestamp:F> (Full Date/Time)
+                displayTimeMessage = `✅ Time successfully converted! It will be shown to everyone in their local timezone.`;
+            } else {
+                displayTimeMessage = `⚠️ **Timezone Conversion Failed:** Could not reliably parse \`${timeString}\`. Displaying plain text time, which may confuse users in different timezones.`;
+            }
+
+            // Generate a unique ID for this session
+            const sessionId = interaction.id; 
+
+            // Create initial session data object
+            const sessionData = {
+                id: sessionId,
+                hostId: member.id,
+                channelId: interaction.channelId,
+                time: timeString, // Store original input for logging/reference
+                scheduledTimestamp: scheduledTimestamp, // Store the Unix timestamp
+                description: description,
+                maxDrivers: Math.max(0, maxDrivers),
+                maxStaff: Math.max(0, maxStaff),
+                maxTrainees: Math.max(0, maxTrainees),
+                drivers: [],
+                staff: [],
+                trainees: [],
+                status: 'active'
+            };
+
+            // Generate the initial embed and components
+            const embed = createSessionEmbed(sessionData, member.user.tag);
+            const components = createActionRow(sessionData);
+
+            try {
+                // Post the session announcement
+                const message = await interaction.channel.send({ embeds: [embed], components: components });
+                
+                // Save the message ID and update the data
+                sessionData.messageId = message.id;
+
+                const currentSessions = loadSessions();
+                currentSessions[sessionId] = sessionData;
+                saveSessions(currentSessions);
+
+                await interaction.followUp({ content: `✅ Session booked successfully! See the announcement above.\n\n${displayTimeMessage}`, ephemeral: true });
+
+            } catch (error) {
+                console.error('Error posting session announcement:', error);
+                await interaction.followUp({ content: '❌ Failed to book the session.', ephemeral: true });
+            }
         }
         
-        // Initial Roster Setup
-        const sessionData = {
-            id: Date.now().toString(),
-            time: time,
-            duration: duration,
-            location: location,
-            hostId: member.id,
-            drivers: [],
-            staff: [],
-            trainees: []
+        // --- /session-end command ---
+        else if (commandName === 'session-end') {
+             await interaction.deferReply({ ephemeral: true });
+
+            const member = interaction.member;
+
+            // Check if the user is a Host or has permission to end sessions
+            const isHost = member.roles.cache.has(HOST_ID);
+            const isJuniorStaff = JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
+
+            if (!isHost && !isJuniorStaff) {
+                return interaction.followUp({ content: '❌ You do not have permission to end a session.', ephemeral: true });
+            }
+
+            const messageIdOrLink = interaction.options.getString('message_id');
+            // Attempt to extract the ID from a link if provided
+            const messageIdMatch = messageIdOrLink.match(/(\d+)$/);
+            const targetMessageId = messageIdMatch ? messageIdMatch[1] : messageIdOrLink;
+            
+            const currentSessions = loadSessions();
+            let sessionToDeleteId = null;
+            let targetSession = null;
+
+            // Find the session ID linked to this message ID
+            for (const id in currentSessions) {
+                if (currentSessions[id].messageId === targetMessageId) {
+                    sessionToDeleteId = id;
+                    targetSession = currentSessions[id];
+                    break;
+                }
+            }
+
+            if (!sessionToDeleteId) {
+                 return interaction.followUp({ content: '❌ Session not found. Please ensure the message ID or link is correct and the session is active.', ephemeral: true });
+            }
+
+            try {
+                const channel = await client.channels.fetch(targetSession.channelId);
+                const message = await channel.messages.fetch(targetMessageId);
+
+                // Archive the embed
+                const hostTag = await client.users.fetch(targetSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
+                const archivedEmbed = createSessionEmbed(targetSession, hostTag)
+                    .setColor(0x808080)
+                    .setTitle(`[ARCHIVED] POP DRIVING Training Session`)
+                    .setDescription(`**This session has concluded and the roster is finalized.**\n\n**Host:** ${hostTag}\n**Original Time:** ${targetSession.time}\n**Session ID:** \`${targetSession.id}\`\n\n---`)
+                    .setTimestamp(new Date()); 
+
+                // Edit the message to remove interactive components and show the archived embed
+                await message.edit({ embeds: [archivedEmbed], components: [] });
+
+                // Delete the session from storage
+                delete currentSessions[sessionToDeleteId];
+                saveSessions(currentSessions);
+
+                await interaction.followUp({ content: `✅ Session with ID \`${targetSession.id}\` successfully ended and archived.`, ephemeral: true });
+
+            } catch (error) {
+                console.error('Error ending session:', error);
+                await interaction.followUp({ content: '❌ Failed to end the session. Check bot permissions or verify the message ID/link.', ephemeral: true });
+            }
+        }
+    }
+
+
+    // --- Component (Button/Select Menu) Handling ---
+    else if (interaction.isStringSelectMenu() || interaction.isButton()) {
+        const customId = interaction.customId;
+        const [action, sessionId] = customId.split('_');
+
+        const currentSessions = loadSessions();
+        const currentSession = currentSessions[sessionId];
+
+        if (!currentSession) {
+            return interaction.reply({ content: '❌ This session is no longer active or the data was lost. Please ask a Host to create a new one.', ephemeral: true });
+        }
+        
+        const member = interaction.member;
+        const userId = member.id;
+
+        // Helper to find existing role index
+        const findRosterIndex = (session) => {
+            const rosterCategories = ['drivers', 'staff', 'trainees'];
+            for (const category of rosterCategories) {
+                const index = session[category].findIndex(u => u.id === userId);
+                if (index !== -1) {
+                    return { category, index };
+                }
+            }
+            return null; // User not found in any roster
         };
         
-        // Create the initial embed and button
-        const initialEmbed = createSessionEmbed(sessionData, interaction.user.tag);
+        // --- Sign Up Action ---
+        if (action === 'signup' && interaction.isStringSelectMenu()) {
+            await interaction.deferReply({ ephemeral: true });
+
+            const roleToSignFor = interaction.values[0]; // e.g., 'driver', 'staff', 'trainee'
+            const rosterCategory = roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
+            
+            // 1. Check if user is already signed up
+            const existingEntry = findRosterIndex(currentSession);
+            if (existingEntry) {
+                // If they are signed up, move them (remove from old, add to new)
+                if (existingEntry.category === rosterCategory) {
+                    return interaction.followUp({ content: `✅ You are already signed up as **${roleToSignFor.toUpperCase()}**.`, ephemeral: true });
+                }
+                
+                // If moving roles, remove from the old roster first
+                currentSession[existingEntry.category].splice(existingEntry.index, 1);
+            }
+
+            // 2. Check Capacity
+            const maxCapacity = currentSession[`max${roleToSignFor.charAt(0).toUpperCase() + roleToSignFor.slice(1)}s`];
+            if (maxCapacity > 0 && currentSession[rosterCategory].length >= maxCapacity) {
+                 // Revert the select menu change visually by editing the message without changing the selection
+                await interaction.editReply({ content: `❌ The **${roleToSignFor.toUpperCase()}** roster is currently full (${maxCapacity}/${maxCapacity}). Please choose another role or try again later.`, ephemeral: true });
+                return;
+            }
+
+            // 3. Add to the new roster
+            currentSession[rosterCategory].push({ id: member.id, tag: member.user.tag });
+
+            // 4. Update the data store
+            currentSessions[sessionId] = currentSession;
+            saveSessions(currentSessions);
+
+            // 5. Update the Message Embed and Components
+            const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
+            const updatedEmbed = createSessionEmbed(currentSession, hostTag);
+            const updatedComponents = createActionRow(currentSession); // Rebuild components to update disabled state
+
+            try {
+                const messageChannel = await client.channels.fetch(currentSession.channelId);
+                const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
+
+                await messageToEdit.edit({ embeds: [updatedEmbed], components: updatedComponents });
+
+                await interaction.followUp({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!`, ephemeral: true });
+
+            } catch (error) {
+                console.error('Error signing up and updating message:', error);
+                await interaction.followUp({ content: '❌ Failed to update the session roster. Please try again.', ephemeral: true });
+            }
+        }
         
-        // Setup the interactive buttons
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`signup_button_${sessionData.id}`)
-                .setLabel('Sign Up Here 🖊️')
-                .setStyle(ButtonStyle.Success), 
-            new ButtonBuilder()
-                .setCustomId(`cancel_button_${sessionData.id}`)
-                .setLabel('Cancel Signup ✖️')
-                .setStyle(ButtonStyle.Danger),
-        );
+        // --- Cancel Signup Action (Button) ---
+        else if (action === 'cancel' && interaction.isButton()) {
+            await interaction.deferReply({ ephemeral: true });
+            
+            const existingEntry = findRosterIndex(currentSession);
 
-        try {
-            // Post the message and save its IDs
-            const message = await announcementChannel.send({ embeds: [initialEmbed], components: [row] });
-            sessionData.messageId = message.id;
-            sessionData.channelId = message.channelId;
+            if (!existingEntry) {
+                 return interaction.followUp({ content: '❌ You are not currently signed up for this session.', ephemeral: true });
+            }
 
-            // Save the new session data to sessions.json
-            const sessions = getSessions();
-            sessions[sessionData.id] = sessionData;
-            saveSessions(sessions);
+            // 1. Remove user from the roster
+            currentSession[existingEntry.category].splice(existingEntry.index, 1);
 
-            await interaction.editReply({ content: `✅ Session successfully booked! See announcement in ${announcementChannel.toString()}.` });
+            // 2. Update the data store
+            currentSessions[sessionId] = currentSession;
+            saveSessions(currentSessions);
 
-        } catch (error) {
-            console.error('Error posting session announcement:', error);
-            await interaction.editReply({ content: '❌ Failed to post the announcement. Check bot permissions in the target channel.' });
+            // 3. Update the Message Embed and Components
+            const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
+            const updatedEmbed = createSessionEmbed(currentSession, hostTag);
+            const updatedComponents = createActionRow(currentSession); // Rebuild components to update disabled state
+
+            try {
+                const messageChannel = await client.channels.fetch(currentSession.channelId);
+                const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
+
+                // Use the new components to ensure the Select Menu reflects available capacity correctly
+                await messageToEdit.edit({ embeds: [updatedEmbed], components: updatedComponents });
+
+                await interaction.followUp({ content: `✅ You have been successfully removed from the session roster.`, ephemeral: true });
+            } catch (error) {
+                console.error('Error cancelling signup and updating message:', error);
+                await interaction.followUp({ content: '❌ Failed to cancel your signup. Please try again.', ephemeral: true });
+            }
         }
     }
 });
 
-// --- Interaction Handling (Signup Buttons and Select Menu) ---
-client.on('interactionCreate', async interaction => {
-    // Check for Button interaction (The initial "Sign Up" click)
-    if (interaction.isButton()) {
-        const [action, , sessionId] = interaction.customId.split('_'); 
 
-        if (!sessionId) return;
-
-        const sessions = getSessions();
-        const session = sessions[sessionId];
-        if (!session) return interaction.reply({ content: '❌ This session could not be found or has ended.', ephemeral: true });
-
-        if (action === 'signup') {
-            // --- 2. Show Role Selection Menu ---
-            const selectMenu = new StringSelectMenuBuilder()
-                .setCustomId(`role_select_${sessionId}`)
-                .setPlaceholder('Choose your role for this session...')
-                .addOptions([
-                    { label: 'Driver 🚗', value: 'driver', description: 'Anyone can join as a Driver.' },
-                    { label: 'Staff 🛠️', value: 'staff', description: 'Requires Junior Staff role or higher.' },
-                    { label: 'Trainee 🎓', value: 'trainee', description: 'Requires Trainee Training role only.' },
-                ]);
-
-            const row = new ActionRowBuilder().addComponents(selectMenu);
-
-            await interaction.reply({
-                content: 'Please select the role you are signing up for:',
-                components: [row],
-                ephemeral: true // Only the user who clicked sees this menu
-            });
-        }
-        else if (action === 'cancel') {
-             await interaction.deferUpdate();
-
-             let currentSessions = getSessions();
-             let currentSession = currentSessions[sessionId];
-             if (!currentSession) return;
-             
-             // Remove the user from all categories
-             currentSession = removeUserFromRoster(currentSession, interaction.user.id);
-
-             // Update the data store
-             currentSessions[sessionId] = currentSession;
-             saveSessions(currentSessions);
-
-             // Re-render the embed
-             const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-             const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-             
-             try {
-                const messageChannel = await client.channels.fetch(currentSession.channelId);
-                const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
-                await messageToEdit.edit({ embeds: [updatedEmbed], components: messageToEdit.components }); // Preserve buttons
-
-                await interaction.followUp({ content: '✅ You have been successfully removed from the session roster.', ephemeral: true });
-             } catch (error) {
-                console.error('Error cancelling signup and updating message:', error);
-                await interaction.followUp({ content: '❌ Failed to update the session roster. Please try again.', ephemeral: true });
-             }
-        }
-    }
-
-    // Check for Select Menu interaction (Role selection)
-    if (interaction.isStringSelectMenu()) {
-        const [action, sessionId] = interaction.customId.split('_');
-        if (action !== 'role_select') return; // Note: Use role_select as defined above
-
-        await interaction.deferUpdate();
-
-        const roleToSignFor = interaction.values[0]; // 'driver', 'staff', or 'trainee'
-        const member = interaction.member;
-        
-        // --- 3. Role Restriction Checks ---
-        if (roleToSignFor === 'staff') {
-            // Staff check: Must have ANY of the JUNIOR_STAFF_IDS OR the HOST_ID
-            const requiredStaffRoles = [HOST_ID, ...JUNIOR_STAFF_IDS];
-            // Check if the user has at least one of the required roles
-            const hasRequiredStaffRole = requiredStaffRoles.some(roleId => member.roles.cache.has(roleId));
-
-            if (!hasRequiredStaffRole) {
-                // Creates a list of role mentions for the error message
-                const roleMentions = JUNIOR_STAFF_IDS.map(id => `<@&${id}>`).join(' or ');
-                
-                return interaction.followUp({ 
-                    content: `❌ **Permission Denied!** You must have the ${roleMentions} role or higher (Session Host) to sign up as Staff.`, 
-                    ephemeral: true 
-                });
-            }
-        } else if (roleToSignFor === 'trainee') {
-            // Trainee check: Must have the exact TRAINEE_ID role
-            if (!member.roles.cache.has(TRAINEE_ID)) {
-                return interaction.followUp({ 
-                    content: `❌ **Permission Denied!** You must have the <@&${TRAINEE_ID}> role to sign up as Trainee.`, 
-                    ephemeral: true 
-                });
-            }
-        }
-
-        // --- 4. Roster Update Logic ---
-        let currentSessions = getSessions();
-        let currentSession = currentSessions[sessionId];
-        if (!currentSession) return;
-
-        // Remove the user from any other category first (ensure they only occupy one slot)
-        currentSession = removeUserFromRoster(currentSession, member.id);
-
-        // Add user to the selected category
-        const rosterCategory = roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
-        currentSession[rosterCategory].push({ id: member.id, tag: member.user.tag });
-
-        // Update the data store
-        currentSessions[sessionId] = currentSession;
-        saveSessions(currentSessions);
-
-        // --- 5. Update the Message Embed ---
-        const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-        const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-
-        try {
-            // Find the original message and update the embed with the new roster
-            const messageChannel = await client.channels.fetch(currentSession.channelId);
-            const messageToEdit = await messageChannel.messages.fetch(currentSession.messageId);
-
-            // Fetch the current components (buttons/menu) to ensure they persist
-            const existingComponents = messageToEdit.components;
-
-            await messageToEdit.edit({ embeds: [updatedEmbed], components: existingComponents });
-
-            await interaction.followUp({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!`, ephemeral: true });
-
-        } catch (error) {
-            console.error('Error signing up and updating message:', error);
-            await interaction.followUp({ content: '❌ Failed to update the session roster. Please try again.', ephemeral: true });
-        }
-    }
+// --- Web Server for Render Uptime ---
+// This simple web server must run to prevent the Render Free Web Service from sleeping.
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('POP DRIVING Bot is running!\n');
+}).listen(port, () => {
+    console.log(`Web server running on port ${port} (Required for Render uptime).`);
 });
 
 
