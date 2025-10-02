@@ -132,14 +132,16 @@ function parseTimeString(timeString) {
         // dayjs().tz(tz) sets the current time in that zone
         let date = dayjs.tz(timeWithZone, format, tz);
 
-        // Check for "tomorrow" or "today" keywords (relative time handling)
-        if (timeString.toLowerCase().includes('tomorrow')) {
-            date = date.add(1, 'day');
-        } else if (timeString.toLowerCase().includes('today')) {
-            // No need to add a day, just use the current day
-        }
-
+        // FIX: Check if the date is valid BEFORE applying relative time adjustments
+        // This prevents the RangeError that occurs when trying to modify an invalid date object.
         if (date.isValid()) {
+            // Check for "tomorrow" or "today" keywords (relative time handling)
+            if (timeString.toLowerCase().includes('tomorrow')) {
+                date = date.add(1, 'day');
+            } else if (timeString.toLowerCase().includes('today')) {
+                // No need to add a day, just use the current day
+            }
+            
             // Discord requires the Unix timestamp (seconds since epoch), which is UTC.
             // .unix() returns seconds, which is what Discord expects for the <t:TIMESTAMP> format.
             return date.unix(); 
@@ -205,7 +207,7 @@ function createActionRow(session) {
         description: role.max > 0 ? `Max: ${role.max} | Current: ${role.current}` : `Current: ${role.current}`,
         // Disable the option if capacity is reached
         default: false,
-        disabled: role.max > 0 && role.current >= role.max
+        disabled: role.max > 0 && role.current >= role.current
     }));
 
     const selectMenu = new StringSelectMenuBuilder()
