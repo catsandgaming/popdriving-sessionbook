@@ -14,23 +14,16 @@ const {
     ButtonBuilder, 
     ButtonStyle, 
     PermissionsBitField, 
-    ChannelType // Needed for specifying text channel type in command
+    ChannelType, // Needed for specifying text channel type in command
+    MessageFlags // Used for ephemeral replacement
 } = require('discord.js');
 
 // --- Configuration Constants from .env ---
 const TOKEN = process.env.BOT_TOKEN;
 const HOST_ID = process.env.SESSION_HOST_ID; 
-// JUNIOR_STAFF_IDS is read as a comma-separated string and split into an array.
 const JUNIOR_STAFF_IDS = process.env.JUNIOR_STAFF_IDS ? process.env.JUNIOR_STAFF_IDS.split(',') : []; 
 const TRAINEE_ID = process.env.TRAINEE_ID;
 const SESSIONS_FILE = 'sessions.json'; // Persistent storage for ongoing sessions
-
-// --- Button Custom ID Constants ---
-const SIGNUP_DRIVER = 'signup_driver';
-const SIGNUP_TRAINEE = 'signup_trainee';
-const SIGNUP_STAFF = 'signup_staff'; // Custom ID for the Staff button
-const CHANGE_ROLE_PREFIX = 'change_role_';
-const REMOVE_ROLE = 'remove_role';
 
 // --- Client Setup ---
 const client = new Client({
@@ -45,8 +38,17 @@ const client = new Client({
 // --- Utility Functions ---
 
 /**
- * Ensures the session data file exists and is readable.
- * @returns {object} The current sessions object.
+ * Creates a unique session ID based on the channel ID and the current timestamp.
+ * @param {string} channelId 
+ * @returns {string}
+ */
+function generateSessionId(channelId) {
+    return `${channelId}-${Date.now()}`;
+}
+
+/**
+ * Loads the current active sessions from the JSON file.
+ * @returns {Object} An object mapping session IDs to session data.
  */
 function loadSessions() {
     try {
@@ -54,466 +56,337 @@ function loadSessions() {
             const data = fs.readFileSync(SESSIONS_FILE, 'utf8');
             return JSON.parse(data);
         }
-    } catch (e) {
-        console.error('Failed to load sessions. Starting with empty state.', e);
+        return {};
+    } catch (error) {
+        console.error('Error loading sessions:', error);
+        return {};
     }
-    return {};
 }
 
 /**
- * Saves the current session data to the file.
- * @param {object} sessions - The sessions object to save.
+ * Saves the current active sessions to the JSON file.
+ * @param {Object} sessions 
  */
 function saveSessions(sessions) {
     try {
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
-    } catch (e) {
-        console.error('Failed to save sessions.', e);
+        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
+    } catch (error) {
+        console.error('Error saving sessions:', error);
     }
 }
 
 /**
- * Simple pluralization utility for session categories.
- * @param {string} role - The role name (e.g., 'driver', 'trainee', 'staff').
- * @returns {string} The plural form (e.g., 'drivers', 'trainees', 'staffs').
- */
-function toRosterCategory(role) {
-    // We treat 'staff' as a special case if needed, or rely on simple 's'
-    if (role === 'staff') return 'staffs'; 
-    return role + 's';
-}
-
-/**
- * Creates the embed for the session message.
- * @param {object} session - The current session object.
- * @param {string} hostTag - The Discord tag of the host.
- * @returns {EmbedBuilder} The constructed embed.
+ * Creates the Discord embed for a session.
+ * @param {Object} session The session data.
+ * @param {string} hostTag The Discord tag of the host.
+ * @returns {EmbedBuilder}
  */
 function createSessionEmbed(session, hostTag) {
-    const drivers = session.drivers.map(d => `<@${d.id}> (${d.tag})`).join('\n') || '*(None)*';
-    const trainees = session.trainees.map(t => `<@${t.id}> (${t.tag})`).join('\n') || '*(None)*';
-    const staffs = session.staffs.map(s => `<@${s.id}> (${s.tag})`).join('\n') || '*(None)*';
-
-    return new EmbedBuilder()
-        .setColor(0x0099ff)
-        .setTitle(`POP Driving Session: ${session.sessionName}`)
-        .setDescription(`Hosted by **${hostTag}** on <t:${Math.floor(session.timestamp / 1000)}:f> (<t:${Math.floor(session.timestamp / 1000)}:R>)`)
+    const embed = new EmbedBuilder()
+        .setColor(0x0099FF)
+        .setTitle(`Driving Session: ${session.title}`)
+        .setDescription(`Hosted by: **${hostTag}**\nTime: **${session.time}**\n\nClick the buttons below to sign up!`)
         .addFields(
-            { name: 'Drivers', value: drivers, inline: true },
-            { name: 'Trainees', value: trainees, inline: true },
-            { name: 'Staff', value: staffs, inline: false } // Staff is set to full width
+            { 
+                name: 'DRIVERS', 
+                value: session.drivers.length > 0 ? session.drivers.map(u => `<@${u.id}>`).join('\n') : 'No drivers signed up yet.', 
+                inline: true 
+            },
+            { 
+                name: 'JUNIOR STAFF', 
+                value: session.juniorstaff.length > 0 ? session.juniorstaff.map(u => `<@${u.id}>`).join('\n') : 'No junior staff signed up yet.', 
+                inline: true 
+            },
+            { 
+                name: 'TRAINEES', 
+                value: session.trainees.length > 0 ? session.trainees.map(u => `<@${u.id}>`).join('\n') : 'No trainees signed up yet.', 
+                inline: true 
+            }
         )
-        .setFooter({ text: `Session ID: ${session.id}` })
-        .setTimestamp();
+        .setTimestamp()
+        .setFooter({ text: `Session ID: ${session.id}` });
+
+    return embed;
 }
 
 /**
- * Creates the interactive components (buttons/menu) for the session message.
- * This is where the Staff button is correctly added.
- * @param {string} sessionId - The ID of the session.
- * @returns {ActionRowBuilder[]} An array of ActionRowBuilders.
+ * Creates the action row with sign-up buttons.
+ * @param {string} sessionId The ID of the session.
+ * @returns {ActionRowBuilder}
  */
-function createSessionComponents(sessionId) {
-    // Row 1: Sign up buttons
-    const signupRow = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId(SIGNUP_DRIVER)
-                .setLabel('Sign up as Driver')
-                .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
-                .setCustomId(SIGNUP_TRAINEE)
-                .setLabel('Sign up as Trainee')
-                .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-                .setCustomId(SIGNUP_STAFF) // *** FIX FOR MISSING STAFF BUTTON ***
-                .setLabel('Sign up as Staff')
-                .setStyle(ButtonStyle.Secondary),
-        );
+function createSessionButtons(sessionId) {
+    const driverButton = new ButtonBuilder()
+        .setCustomId(`SIGNUP_${sessionId}_driver`)
+        .setLabel('Sign up as Driver')
+        .setStyle(ButtonStyle.Primary);
 
-    // Row 2: Management/Cancellation buttons (Host-only actions)
-    const managementRow = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId(`cancel_session_${sessionId}`)
-                .setLabel('Cancel Session')
-                .setStyle(ButtonStyle.Danger),
-            new ButtonBuilder()
-                .setCustomId(REMOVE_ROLE)
-                .setLabel('Remove Sign-up')
-                .setStyle(ButtonStyle.Secondary)
-        );
+    const juniorStaffButton = new ButtonBuilder()
+        .setCustomId(`SIGNUP_${sessionId}_juniorstaff`)
+        .setLabel('Sign up as Junior Staff')
+        .setStyle(ButtonStyle.Secondary);
 
-    return [signupRow, managementRow];
+    const traineeButton = new ButtonBuilder()
+        .setCustomId(`SIGNUP_${sessionId}_trainee`)
+        .setLabel('Sign up as Trainee')
+        .setStyle(ButtonStyle.Success);
+        
+    const closeButton = new ButtonBuilder()
+        .setCustomId(`CLOSE_${sessionId}_close`) // Action_SessionId_Role (Role is generic for close)
+        .setLabel('Close Session')
+        .setStyle(ButtonStyle.Danger);
+
+    return new ActionRowBuilder().addComponents(driverButton, juniorStaffButton, traineeButton, closeButton);
 }
 
-/**
- * Utility to check if a user is a Host or Junior Staff.
- * @param {GuildMember} member - The member to check.
- * @returns {boolean} True if they are authorized to host.
- */
-function isAuthorizedHost(member) {
-    // Check if the member has the Host role or any Junior Staff role
-    const juniorStaffRoleIds = JUNIOR_STAFF_IDS.filter(id => id.trim() !== '');
-    return member.roles.cache.has(HOST_ID) || juniorStaffRoleIds.some(id => member.roles.cache.has(id));
-}
+// --- Button Interaction Handler ---
 
 /**
- * Edits a message robustly, specifically handling the DiscordAPIError 10008 (Unknown Message).
- * @param {Message} message - The message object to edit.
- * @param {object} options - The edit options (embeds, components).
- * @returns {boolean} True on success, false on failure (including message deletion).
+ * Handles interactions from the sign-up and close buttons.
+ * @param {import('discord.js').ButtonInteraction} interaction 
  */
-async function robustMessageEdit(message, options) {
-    try {
-        await message.edit(options);
-        return true;
-    } catch (error) {
-        if (error.code === 10008) {
-            // Error 10008: Unknown Message (message was deleted)
-            console.warn(`Attempted to update a deleted message (ID: ${message.id}). This is expected if the message was manually deleted.`);
-            return false;
-        }
-        console.error('Error during message edit:', error);
-        return false;
-    }
-}
+async function handleButtonInteraction(interaction) {
+    if (!interaction.isButton()) return;
 
+    // Acknowledge the interaction immediately to prevent timeout errors (DiscordAPIError[10062])
+    // The final confirmation to the user will be an ephemeral reply via editReply.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(e => {
+        // Log a warning if deferral fails, but continue if possible.
+        if (e.code === 10062) return; // Ignore "Unknown interaction" error on deferral
+        console.warn(`Button Deferal failed for ${interaction.customId}. Interaction might be stale.`, e);
+    });
 
-/**
- * Handles the logic for a user removing themselves from the session.
- * @param {ButtonInteraction} interaction - The interaction object.
- */
-async function handleRoleRemovalExecution(interaction) {
-    await interaction.deferReply({ ephemeral: true });
-
-    const currentSessions = loadSessions();
-    const sessionId = Object.keys(currentSessions).find(id => currentSessions[id].messageId === interaction.message.id);
-
-    if (!sessionId) {
-        return interaction.editReply({ content: '❌ Could not find an active session linked to this message.' });
-    }
-
-    const currentSession = currentSessions[sessionId];
-    const userId = interaction.user.id;
-    let removed = false;
-    let roleRemoved = '';
-
-    // Check all rosters for the user and remove them
-    for (const role of ['drivers', 'trainees', 'staffs']) {
-        const initialLength = currentSession[role].length;
-        currentSession[role] = currentSession[role].filter(member => member.id !== userId);
-        if (currentSession[role].length < initialLength) {
-            removed = true;
-            roleRemoved = role.slice(0, -1); // 'drivers' -> 'driver'
-            break;
-        }
-    }
-
-    if (!removed) {
-        return interaction.editReply({ content: '❌ You are not currently signed up for this session.' });
-    }
-
-    // Update the data store
-    currentSessions[sessionId] = currentSession;
-    saveSessions(currentSessions);
-
-    // --- Update the Message Embed ---
-    const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-    const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-
-    // *** Use the robust message edit function ***
-    const success = await robustMessageEdit(interaction.message, { embeds: [updatedEmbed], components: interaction.message.components });
-
-    if (success) {
-        return interaction.editReply({ content: `✅ You have been removed from the session roster (Role: **${roleRemoved.toUpperCase()}**).` });
-    } else {
-        // Message was deleted, but data was saved successfully
-        return interaction.editReply({ content: `⚠️ Your sign-up data was successfully removed (Role: **${roleRemoved.toUpperCase()}**), but the original session message appears to have been deleted.` });
-    }
-}
-
-/**
- * Handles the logic for a user changing their role.
- * @param {ButtonInteraction} interaction - The interaction object.
- * @param {string} newRole - The role to change to (e.g., 'driver', 'trainee', 'staff').
- */
-async function handleRoleChangeExecution(interaction, newRole) {
-    await interaction.deferReply({ ephemeral: true });
-
-    const currentSessions = loadSessions();
-    const sessionId = Object.keys(currentSessions).find(id => currentSessions[id].messageId === interaction.message.id);
-
-    if (!sessionId) {
-        return interaction.editReply({ content: '❌ Could not find an active session linked to this message.' });
-    }
-
-    const currentSession = currentSessions[sessionId];
-    const userId = interaction.user.id;
-    const newRosterCategory = toRosterCategory(newRole);
-    let oldRosterCategory = null;
-    let oldRole = null;
-
-    // 1. Check current sign-up status and identify the old role
-    for (const role of ['drivers', 'trainees', 'staffs']) {
-        const memberIndex = currentSession[role].findIndex(member => member.id === userId);
-        if (memberIndex !== -1) {
-            oldRosterCategory = role;
-            oldRole = role.slice(0, -1); // 'drivers' -> 'driver'
-            // If they are already in the target role, stop
-            if (oldRosterCategory === newRosterCategory) {
-                return interaction.editReply({ content: `ℹ️ You are already signed up as **${newRole.toUpperCase()}**!` });
-            }
-            // Remove them from the old role
-            currentSession[role].splice(memberIndex, 1);
-            break;
-        }
-    }
-
-    if (!oldRosterCategory) {
-        return interaction.editReply({ content: '❌ You are not currently signed up for this session. Please sign up first.' });
-    }
-
-    // 2. Add the user to the new role
+    const [action, sessionId, roleToSignFor] = interaction.customId.split('_');
     const member = interaction.member;
-    currentSession[newRosterCategory].push({ id: member.id, tag: member.user.tag });
+    const currentSessions = loadSessions();
+    let currentSession = currentSessions[sessionId];
 
-    // 3. Update the data store
-    currentSessions[sessionId] = currentSession;
-    saveSessions(currentSessions);
-
-    // 4. Update the Message Embed
-    const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-    const updatedEmbed = createSessionEmbed(currentSession, hostTag);
-
-    // *** Use the robust message edit function to fix the Unknown Message error ***
-    const success = await robustMessageEdit(interaction.message, { embeds: [updatedEmbed], components: interaction.message.components });
-
-    if (success) {
-        return interaction.editReply({ content: `🔄 Successfully changed your role from **${oldRole.toUpperCase()}** to **${newRole.toUpperCase()}**!` });
-    } else {
-        // Message was deleted, but data was saved successfully
-        return interaction.editReply({ content: `⚠️ Your role change from **${oldRole.toUpperCase()}** to **${newRole.toUpperCase()}** was saved to internal data, but the original session message appears to have been deleted.` });
+    if (!currentSession) {
+        return interaction.editReply({ content: '❌ This session is no longer active or the ID is invalid.' });
     }
-}
 
+    // Function to check if a user has a required role (using the environment variables)
+    const hasRequiredRole = (role) => {
+        switch(role) {
+            case 'driver':
+                return true; 
+            case 'juniorstaff':
+                // Check if the member has the HOST_ID role OR any of the JUNIOR_STAFF_IDS
+                return member.roles.cache.has(HOST_ID) || JUNIOR_STAFF_IDS.some(id => member.roles.cache.has(id));
+            case 'trainee':
+                return member.roles.cache.has(TRAINEE_ID);
+            default:
+                return false;
+        }
+    };
 
-// --- Events ---
+    if (action === 'CLOSE') {
+        if (member.id !== currentSession.hostId && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.editReply({ content: '❌ Only the host or an Administrator can close this session.' });
+        }
+        
+        // Remove session from data store
+        delete currentSessions[sessionId];
+        saveSessions(currentSessions);
 
-client.on('ready', () => {
-    console.log(`Bot is logged in as ${client.user.tag}!`);
+        // Edit the original message to reflect closure and disable buttons
+        const closeEmbed = new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle(`Session Closed: ${currentSession.title}`)
+            .setDescription(`The session hosted by <@${currentSession.hostId}> has been closed.`)
+            .setTimestamp();
 
-    // Setup web server for Render health check
-    http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Web server running on port 10000 (Required for Render uptime).');
-    }).listen(10000);
-});
-
-client.on('interactionCreate', async interaction => {
-    // --- 1. Slash Command Handling (/sessionbook) ---
-    if (interaction.isChatInputCommand()) {
-        const { commandName } = interaction;
-
-        if (commandName === 'sessionbook') {
-            await interaction.deferReply({ ephemeral: true });
-
-            const member = interaction.member;
-            
-            // Check for Host/Junior Staff permissions
-            if (!isAuthorizedHost(member)) {
-                return interaction.editReply({ content: '❌ You do not have permission to start a driving session.' });
-            }
-
-            const sessionName = interaction.options.getString('name');
-            const sessionDate = interaction.options.getString('date');
-            
-            // Create a unique session ID
-            const sessionId = Date.now().toString();
-
-            // Create initial session object
-            const newSession = {
-                id: sessionId,
-                hostId: member.id,
-                sessionName: sessionName,
-                dateString: sessionDate,
-                // Use a standard date object for relative time in embed
-                timestamp: new Date(sessionDate).getTime(), 
-                channelId: interaction.channelId,
-                drivers: [],
-                trainees: [],
-                staffs: [] // Initial empty roster for staff
-            };
-
-            // Get the host's tag for the embed
-            const hostTag = member.user.tag; 
-            const sessionEmbed = createSessionEmbed(newSession, hostTag);
-            const components = createSessionComponents(sessionId);
-
-            // Send the main, persistent session message
-            const sentMessage = await interaction.channel.send({ 
-                embeds: [sessionEmbed], 
-                components: components 
+        try {
+            // Find the original message and update it
+            await interaction.message.edit({ 
+                embeds: [closeEmbed], 
+                components: [] // Remove all buttons
             });
 
-            // Store the message ID for future edits
-            newSession.messageId = sentMessage.id;
+            return interaction.editReply({ content: '✅ Session successfully closed.' });
 
-            // Save the session state
-            const currentSessions = loadSessions();
-            currentSessions[sessionId] = newSession;
-            saveSessions(currentSessions);
-
-            return interaction.editReply({ content: `✅ Session **${sessionName}** created successfully! See the message below.`, ephemeral: true });
+        } catch (error) {
+            console.error('Error closing session:', error);
+            return interaction.editReply({ content: '❌ Failed to close and update the message. Check bot permissions.' });
         }
     }
 
-    // --- 2. Button Interaction Handling (Sign-up, Change Role, Remove, Cancel) ---
-    if (interaction.isButton()) {
-        const customId = interaction.customId;
-        const currentSessions = loadSessions();
+    if (action === 'SIGNUP') {
+        const rosterCategory = roleToSignFor === 'juniorstaff' ? 'juniorstaff' : roleToSignFor + 's'; // e.g., 'driver' -> 'drivers'
+
+        // --- 1. Role Check (Basic Check for Non-Drivers) ---
+        if (roleToSignFor !== 'driver' && !hasRequiredRole(roleToSignFor)) {
+             return interaction.editReply({ content: `❌ You do not have the required role to sign up as a **${roleToSignFor.toUpperCase()}**.` });
+        }
+
+        // Check if user is already signed up in any category
+        const isAlreadySignedUp = Object.keys(currentSession).some(key => 
+            Array.isArray(currentSession[key]) && currentSession[key].some(u => u.id === member.id)
+        );
+
+        if (isAlreadySignedUp) {
+            return interaction.editReply({ content: '⚠️ You are already signed up for this session in another role. To change, please ask the host to remove you first.' });
+        }
+
+        // --- 2. Add to Roster ---
+        if (!currentSession[rosterCategory] || !Array.isArray(currentSession[rosterCategory])) {
+            console.warn(`Roster category '${rosterCategory}' missing or invalid in session ${sessionId}. Initializing as empty array.`);
+            currentSession[rosterCategory] = []; 
+        }
         
-        // --- Cancel Session ---
-        if (customId.startsWith('cancel_session_')) {
-            const sessionId = customId.replace('cancel_session_', '');
+        currentSession[rosterCategory].push({ id: member.id, tag: member.user.tag });
 
-            if (!currentSessions[sessionId]) {
-                return interaction.reply({ content: '❌ Session not found.', ephemeral: true });
-            }
+        // Update the data store
+        currentSessions[sessionId] = currentSession;
+        saveSessions(currentSessions);
 
-            const session = currentSessions[sessionId];
+        // --- 3. Update the Message Embed ---\r\n
+        const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
+        const updatedEmbed = createSessionEmbed(currentSession, hostTag);
+
+        try {
+            // Edit the original message (from interaction.message) with the updated embed
+            // This is the message the user clicked the button on
+            await interaction.message.edit({ embeds: [updatedEmbed], components: interaction.message.components });
+
+            // Final confirmation to the user who clicked the button via editReply
+            return interaction.editReply({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!` });
+
+        } catch (error) {
+            console.error('Error signing up and updating message:', error);
+            // If the original message edit fails, the user still gets confirmation via editReply.
+            return interaction.editReply({ content: '❌ Failed to update the session roster. Please try again.' });
+        }
+    }
+}
+
+
+// --- Main Interaction Handler ---
+client.on('interactionCreate', async interaction => {
+    
+    if (interaction.isChatInputCommand()) {
+        const { commandName, options } = interaction;
+        
+        if (commandName === 'sessionbook') {
             
-            // Authorization check: Only the host or an authorized host can cancel
-            if (interaction.user.id !== session.hostId && !isAuthorizedHost(interaction.member)) {
-                return interaction.reply({ content: '❌ Only the session host or authorized staff can cancel this session.', ephemeral: true });
-            }
-
-            // Delete the session message first
+            // CRITICAL FIX for DiscordAPIError[10062]: Unknown interaction
+            // Deferral is the first network call to Discord, preventing the 3-second timeout.
             try {
-                await interaction.message.delete();
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral }); 
             } catch (e) {
-                console.error('Failed to delete session message on cancel:', e);
-            }
-
-            // Remove session from data store
-            delete currentSessions[sessionId];
-            saveSessions(currentSessions);
-
-            return interaction.reply({ content: `🗑️ Session **${session.sessionName}** has been successfully cancelled and removed.`, ephemeral: true });
-        }
-
-        // --- Remove Sign-up ---
-        if (customId === REMOVE_ROLE) {
-            return handleRoleRemovalExecution(interaction);
-        }
-        
-        // --- Change Role Logic (Example: change_role_driver) ---
-        // This is a placeholder for a more complex role change menu, but if the user
-        // clicks a button with a change_role_ prefix, we handle it here.
-        if (customId.startsWith(CHANGE_ROLE_PREFIX)) {
-            const newRole = customId.replace(CHANGE_ROLE_PREFIX, '');
-            return handleRoleChangeExecution(interaction, newRole);
-        }
-
-        // --- Sign-up Logic ---
-        if (customId.startsWith('signup_')) {
-            await interaction.deferReply({ ephemeral: true });
-            
-            // Get the role string (e.g., 'driver', 'trainee', 'staff')
-            const roleToSignFor = customId.replace('signup_', '');
-            
-            const sessionId = Object.keys(currentSessions).find(id => currentSessions[id].messageId === interaction.message.id);
-
-            if (!sessionId) {
-                return interaction.editReply({ content: '❌ Could not find an active session linked to this message.' });
-            }
-
-            const currentSession = currentSessions[sessionId];
-            const member = interaction.member;
-            const userId = member.id;
-            
-            // 1. Check if the user is already signed up
-            for (const role of ['drivers', 'trainees', 'staffs']) {
-                if (currentSession[role].some(m => m.id === userId)) {
-                    // If they are signed up, offer to change role
-                    return interaction.editReply({ 
-                        content: `ℹ️ You are already signed up as **${role.slice(0, -1).toUpperCase()}**. Would you like to change your role to **${roleToSignFor.toUpperCase()}**?`,
-                        components: [
-                            new ActionRowBuilder().addComponents(
-                                new ButtonBuilder()
-                                    .setCustomId(`${CHANGE_ROLE_PREFIX}${roleToSignFor}`)
-                                    .setLabel(`Change to ${roleToSignFor}`)
-                                    .setStyle(ButtonStyle.Success)
-                            )
-                        ]
-                    });
+                // If deferral fails (e.g., interaction already timed out), prevent the process crash.
+                if (e.code === 10062) {
+                    console.error('CRITICAL: Slash command deferral failed (Timeout/Unknown Interaction).');
+                    return; // Stop processing this interaction
                 }
+                console.error('Error deferring command reply:', e);
+                return;
             }
-            
-            // 2. Determine the correct roster category (e.g., 'driver' -> 'drivers')
-            const rosterCategory = toRosterCategory(roleToSignFor);
 
-            // Ensure the category exists (safety check)
-            if (!currentSession[rosterCategory] || !Array.isArray(currentSession[rosterCategory])) {
-                console.warn(`Roster category '${rosterCategory}' missing or invalid in session ${sessionId}. Initializing as empty array.`);
-                currentSession[rosterCategory] = []; 
+            // --- 1. Permission Check ---
+            // Only allow users with the Host ID or Administrator permission to run the command
+            const member = interaction.member;
+            if (member.id !== HOST_ID && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+                return interaction.editReply({ content: '❌ You do not have permission to book a session.' });
             }
+
+            // --- 2. Gather Command Options ---
+            const title = options.getString('title');
+            const time = options.getString('time');
+            // The channel is the channel the command was run in by default.
+            const channelId = interaction.channelId; 
+            const hostId = member.id;
             
-            // 3. Add the user to the roster
-            currentSession[rosterCategory].push({ id: member.id, tag: member.user.tag });
+            // --- 3. Create Session Data ---
+            const sessionId = generateSessionId(channelId);
+            const newSession = {
+                id: sessionId,
+                title: title,
+                time: time,
+                channelId: channelId,
+                hostId: hostId,
+                drivers: [],
+                juniorstaff: [],
+                trainees: [],
+                messageId: null // To be filled after the message is sent
+            };
 
-            // Update the data store
-            currentSessions[sessionId] = currentSession;
-            saveSessions(currentSessions);
+            // --- 4. Send Message and Get Message ID ---
+            const hostTag = member.user.tag;
+            const embed = createSessionEmbed(newSession, hostTag);
+            const components = createSessionButtons(sessionId);
 
-            // 4. Update the Message Embed
-            const hostTag = await client.users.fetch(currentSession.hostId).then(user => user.tag).catch(() => 'Unknown Host');
-            const updatedEmbed = createSessionEmbed(currentSession, hostTag);
+            try {
+                // Send the actual session post to the channel
+                const message = await interaction.channel.send({
+                    embeds: [embed],
+                    components: [components]
+                });
 
-            // *** Use the robust message edit function to fix the Unknown Message error ***
-            const success = await robustMessageEdit(interaction.message, { embeds: [updatedEmbed], components: interaction.message.components });
+                // Update the session object with the message ID
+                newSession.messageId = message.id;
 
-            if (success) {
-                return interaction.editReply({ content: `✅ You have successfully signed up as a **${roleToSignFor.toUpperCase()}**!` });
-            } else {
-                // Message was deleted, but data was saved successfully
-                return interaction.editReply({ content: `⚠️ Your internal sign-up data was updated as **${roleToSignFor.toUpperCase()}**, but the original session message appears to have been deleted.` });
+                // --- 5. Save Session ---
+                const currentSessions = loadSessions();
+                currentSessions[sessionId] = newSession;
+                saveSessions(currentSessions);
+                
+                // --- 6. Final Command Confirmation ---
+                return interaction.editReply({ 
+                    content: `✅ Session **${title}** successfully booked. See the post in <#${channelId}>.`, 
+                });
+
+            } catch (error) {
+                console.error('Error sending session message or saving data:', error);
+                // If the message send fails, try to edit the deferral reply with the error.
+                return interaction.editReply({ content: '❌ An error occurred while posting the session. Please check bot permissions and try again.' });
             }
         }
+    } else if (interaction.isButton()) {
+        // Handle button interactions
+        await handleButtonInteraction(interaction);
     }
 });
 
-// --- Register Slash Commands and Log in ---
 
-client.on('ready', async () => {
-    // Register the slash command
-    const commands = [
-        new SlashCommandBuilder()
-            .setName('sessionbook')
-            .setDescription('Creates a new driving session sign-up sheet.')
-            .addStringOption(option => 
-                option.setName('name')
-                    .setDescription('The name of the driving session (e.g., Friday Night Run)')
-                    .setRequired(true))
-            .addStringOption(option =>
-                option.setName('date')
-                    .setDescription('The date and time of the session (e.g., 2025-10-15 19:00 UTC)')
-                    .setRequired(true))
-            .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageChannels) // Example permission check
-            .toJSON(),
-    ];
+// --- Slash Command Definition and Registration ---
 
+// Renamed from 'ready' to 'clientReady' to address the deprecation warning
+client.on('clientReady', async () => { 
+    console.log(`Bot is logged in as ${client.user.tag}!`);
+
+    // Define the slash command
+    const sessionBookCommand = new SlashCommandBuilder()
+        .setName('sessionbook')
+        .setDescription('Books a new driving session and posts it to the current channel.')
+        .addStringOption(option =>
+            option.setName('title')
+                .setDescription('The title/location of the session (e.g., Highway Practice, City Driving)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('time')
+                .setDescription('The time and date of the session (e.g., 20:00 UTC, Today 3 PM PST)')
+                .setRequired(true));
+
+    // Register the command
     try {
-        const guild = client.guilds.cache.first(); // Assuming the bot is only in one guild for simplicity
-        if (guild) {
-            await guild.commands.set(commands);
-            console.log('Slash command /sessionbook registered successfully.');
-        } else {
-             console.log('Bot is not in any guild, cannot register commands.');
-        }
+        await client.application.commands.set([sessionBookCommand]);
+        console.log('Slash command /sessionbook registered successfully.');
     } catch (error) {
-        console.error('Error registering slash commands:', error);
+        console.error('Failed to register slash commands:', error);
     }
+});
+
+
+// --- Web Server for Render Health Check ---
+// Render requires a running web server on the specified port.
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running\n');
+});
+
+const port = process.env.PORT || 3000;
+server.listen(port, () => {
+    console.log(`Web server listening on port ${port}`);
 });
 
 
