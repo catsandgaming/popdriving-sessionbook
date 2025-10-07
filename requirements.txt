@@ -1,5 +1,0 @@
-discord.py
-Voice Support
-gTTS
-python-dotenv
-FFmpeg	
