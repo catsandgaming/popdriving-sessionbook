@@ -133,7 +133,14 @@ client.on(Events.InteractionCreate, async interaction => {
         if (commandName === 'sessionbook') {
             
             // CRITICAL: Acknowledge the command immediately to avoid the "Unknown interaction" (10062) timeout
-            await interaction.deferReply({ ephemeral: true });
+            // We must wrap this in a try/catch to prevent the bot from crashing if the interaction expires.
+            try {
+                await interaction.deferReply({ ephemeral: true });
+            } catch (e) {
+                // If defer fails, the interaction is too old and we stop processing it.
+                console.error('Failed to defer reply (Interaction Expired):', e.message);
+                return; 
+            }
 
             const time = interaction.options.getString('time');
             const duration = interaction.options.getString('duration');
@@ -167,7 +174,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 // 5. Edit the initial reply to show success
                 return interaction.editReply({ content: `✅ New session started by <@${hostId}>!` });
             } catch (err) {
-                console.error('Failed to send session message:', err.message);
+                console.error('Failed to send session message or edit reply:', err.message);
+                // Fallback reply if the message sending fails but deferral succeeded
                 return interaction.editReply({ content: '❌ Error starting session. Check bot permissions and ensure the channel is valid.' });
             }
         }
@@ -241,7 +249,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         const roleKey = roleMap[id];
-        if (!roleKey) return interaction.deleteReply(); // Should not happen
+        if (!roleKey) return interaction.deleteReply(); // Delete deferred reply
 
         // --- Check for closed session before sign-up ---
         if (sessionData.isClosed) {
