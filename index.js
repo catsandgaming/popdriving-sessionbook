@@ -14,7 +14,7 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers, // Required to fetch roles for sign-ups
-        GatewayIntentBits.GuildMessages, // Corrected typo here
+        GatewayIntentBits.GuildMessages, 
         GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
@@ -133,7 +133,6 @@ client.on(Events.InteractionCreate, async interaction => {
         if (commandName === 'sessionbook') {
             
             // CRITICAL: Acknowledge the command immediately to avoid the "Unknown interaction" (10062) timeout
-            // Moved to the top of the logic block.
             await interaction.deferReply({ ephemeral: true });
 
             const time = interaction.options.getString('time');
@@ -176,9 +175,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isButton()) {
         
+        // **CRITICAL FIX:** Defer the reply immediately to prevent the DiscordAPIError[10062] timeout.
+        await interaction.deferReply({ ephemeral: true });
+
         // 1. Check for Active Session and Timeout
         if (!activeSessionMessageId || interaction.message.id !== activeSessionMessageId) {
-            return interaction.reply({ content: '❌ This sign-up is for a past session or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
+            return interaction.editReply({ content: '❌ This sign-up is for a past session or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
         }
 
         const member = interaction.member;
@@ -187,7 +189,7 @@ client.on(Events.InteractionCreate, async interaction => {
             console.error('Could not fetch member for role check:', e.message);
         });
 
-        if (!fullMember) return interaction.reply({ content: 'Cannot fetch member info for role verification.', ephemeral: true });
+        if (!fullMember) return interaction.editReply({ content: 'Cannot fetch member info for role verification.', ephemeral: true });
 
 
         const id = interaction.customId;
@@ -204,13 +206,13 @@ client.on(Events.InteractionCreate, async interaction => {
             const isStaff = fullMember.roles.cache.some(r => r.name === ROLE_NAMES.pop_staff);
 
             if (!isHost && !isStaff) {
-                return interaction.reply({ content: `❌ Only the host or a **${ROLE_NAMES.pop_staff}** member can close this session.`, ephemeral: true });
+                return interaction.editReply({ content: `❌ Only the host or a **${ROLE_NAMES.pop_staff}** member can close this session.`, ephemeral: true });
             }
             
             sessionData.isClosed = true;
             
             // Acknowledge the button click and update the message
-            await interaction.reply({ content: '✅ Session has been **CLOSED**. No further sign-ups are allowed.', ephemeral: true });
+            await interaction.editReply({ content: '✅ Session has been **CLOSED**. No further sign-ups are allowed.', ephemeral: true });
             return updateSessionMessage();
         }
 
@@ -220,8 +222,6 @@ client.on(Events.InteractionCreate, async interaction => {
             
             if (sessionData && typeof sessionData === 'object') {
                 Object.keys(roleMap).forEach(roleKey => {
-                    // Check if sessionData[roleKey] is defined (it should be, but this protects against the error)
-                    // If it's null/undefined, default to an empty array [] before filtering.
                     const roleList = sessionData[roleKey] ?? []; 
                     const initialLength = roleList.length; 
                     
@@ -236,16 +236,16 @@ client.on(Events.InteractionCreate, async interaction => {
                 });
             }
             
-            await interaction.reply({ content: wasSignedUp ? '✅ You cancelled your sign-up slot.' : 'ℹ️ You were not signed up for any role.', ephemeral: true });
+            await interaction.editReply({ content: wasSignedUp ? '✅ You cancelled your sign-up slot.' : 'ℹ️ You were not signed up for any role.', ephemeral: true });
             return updateSessionMessage();
         }
 
         const roleKey = roleMap[id];
-        if (!roleKey) return;
+        if (!roleKey) return interaction.deleteReply(); // Should not happen
 
         // --- Check for closed session before sign-up ---
         if (sessionData.isClosed) {
-            return interaction.reply({ content: '❌ This session is **CLOSED**. Sign-ups are no longer allowed.', ephemeral: true });
+            return interaction.editReply({ content: '❌ This session is **CLOSED**. Sign-ups are no longer allowed.', ephemeral: true });
         }
         
         // --- Role Check Logic ---
@@ -260,7 +260,8 @@ client.on(Events.InteractionCreate, async interaction => {
             const hasRequiredRole = fullMember.roles.cache.some(r => r.name === requiredRoleName);
 
             if (!hasRequiredRole) {
-                return interaction.reply({ 
+                // This handles why you couldn't switch to Junior Staff if you didn't have the role.
+                return interaction.editReply({ 
                     content: `❌ You do not have the required Discord role: **${requiredRoleName}**.`, 
                     ephemeral: true 
                 });
@@ -269,25 +270,28 @@ client.on(Events.InteractionCreate, async interaction => {
         
         // --- Core Sign-up Logic: Sign up for the chosen role and remove from others ---
 
-        // Check if the user is already signed up for *this* role after passing the role eligibility checks
+        // Check if the user is already signed up for *this* specific role.
         const alreadySignedUpForThisRole = sessionData[roleKey]?.includes(fullMember.id);
 
         if (alreadySignedUpForThisRole) {
-            return interaction.reply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
+            // User clicked the button for the role they already have.
+            return interaction.editReply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
         }
         
-        // If the user is eligible and not already signed up, proceed to switch roles
+        // If the user is eligible and either not signed up or switching roles:
+        
+        // 1. Remove user ID from all other role lists
         Object.keys(roleMap).forEach(role => {
             if (role !== roleKey) {
-                // Filter user ID out of other role lists, safely using empty array if sessionData[role] is missing
+                // Filter user ID out of other role lists
                 sessionData[role] = (sessionData[role] ?? []).filter(u => u !== fullMember.id);
             }
         });
 
-        // Add user ID to the new role list
+        // 2. Add user ID to the new role list
         sessionData[roleKey].push(fullMember.id);
 
-        await interaction.reply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**! You have been removed from any previous role.`, ephemeral: true });
+        await interaction.editReply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**! You have been removed from any previous role.`, ephemeral: true });
         updateSessionMessage();
     }
 });
