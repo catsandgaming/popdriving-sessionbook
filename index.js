@@ -1,34 +1,40 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
 const express = require('express');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// Simple web server to satisfy Render port requirement
-app.get('/', (req, res) => res.send('POP Driving bot is running!'));
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+app.get('/', (req, res) => {
+  res.send('Bot is running!');
+});
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
 
-// ======== SESSION DATA ========
-let session = {
-  closed: false,
-  hostId: null,
-  time: null,
-  duration: null,
-  signups: {
-    driver: [],
-    trainee: [],
-    junior: []
-  }
-};
+// === Discord Bot Setup ===
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+});
 
-// ======== REGISTER COMMAND ========
+const sessions = {}; // Store session signups
+
+client.once('clientReady', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
+
+// === Commands ===
 const commands = [
   new SlashCommandBuilder()
     .setName('sessionbook')
-    .setDescription('Create a new driving session!')
+    .setDescription('Sign up, cancel, or view driving session participants')
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -37,7 +43,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     console.log('Started refreshing application (/) commands.');
     await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      Routes.applicationCommands(process.env.CLIENT_ID),
       { body: commands }
     );
     console.log('Successfully reloaded application (/) commands.');
@@ -46,111 +52,87 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   }
 })();
 
-// ======== HANDLE INTERACTIONS ========
+// === Interaction Handling ===
 client.on('interactionCreate', async interaction => {
-  try {
-    if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === 'sessionbook') {
-        if (session.closed) {
-          return interaction.reply({ content: '🚫 Sign-ups are closed!', ephemeral: true });
-        }
+  if (interaction.isChatInputCommand() && interaction.commandName === 'sessionbook') {
+    const userId = interaction.user.id;
+    const guildId = interaction.guildId;
 
-        session.hostId = interaction.user.id;
-        session.time = 'p'; // Replace with actual time
-        session.duration = 'p'; // Replace with actual duration
+    if (!sessions[guildId]) sessions[guildId] = [];
 
-        // Buttons
-        const row = new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId('signup_driver')
-              .setLabel('🏎️ Driver')
-              .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-              .setCustomId('signup_trainee')
-              .setLabel('🎓 Trainee')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('signup_junior')
-              .setLabel('👮 Junior Staff')
-              .setStyle(ButtonStyle.Success)
-          );
+    const isSignedUp = sessions[guildId].includes(userId);
 
-        await interaction.reply({
-          embeds: [
-            {
-              title: '🚗 Driving Session',
-              description:
-                `**Host:** <@${session.hostId}>\n` +
-                `**Time:** ${session.time}\n` +
-                `**Duration:** ${session.duration} minutes\n\n` +
-                `**Sign-ups:**\n` +
-                `🏎️ Driver — None\n` +
-                `🎓 Trainee — None\n` +
-                `👮 Junior Staff — None`,
-              color: 0x00bfff
-            }
-          ],
-          components: [row]
-        });
-      }
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(isSignedUp ? 'cancel_session' : 'join_session')
+          .setLabel(isSignedUp ? 'Cancel Session' : 'Sign Up')
+          .setStyle(isSignedUp ? ButtonStyle.Danger : ButtonStyle.Success)
+      );
+
+    // Build list of signed-up users
+    const signedUpUsers = sessions[guildId]
+      .map(id => `<@${id}>`)
+      .join('\n') || 'No users yet.';
+
+    await interaction.reply({
+      content: `${isSignedUp ? 'You are signed up!' : 'Sign up for session!'}\n\n**Current Participants:**\n${signedUpUsers}`,
+      components: [row],
+      ephemeral: true
+    });
+  }
+
+  if (interaction.isButton()) {
+    const userId = interaction.user.id;
+    const guildId = interaction.guildId;
+
+    if (!sessions[guildId]) sessions[guildId] = [];
+
+    if (interaction.customId === 'join_session') {
+      if (!sessions[guildId].includes(userId)) sessions[guildId].push(userId);
     }
 
-    if (interaction.isButton()) {
-      if (session.closed) {
-        return interaction.reply({ content: '🚫 Sign-ups are closed!', ephemeral: true });
-      }
-
-      // Handle button signups
-      switch (interaction.customId) {
-        case 'signup_driver':
-          if (!session.signups.driver.includes(interaction.user.id)) {
-            session.signups.driver.push(interaction.user.id);
-          }
-          break;
-        case 'signup_trainee':
-          if (!session.signups.trainee.includes(interaction.user.id)) {
-            session.signups.trainee.push(interaction.user.id);
-          }
-          break;
-        case 'signup_junior':
-          if (!session.signups.junior.includes(interaction.user.id)) {
-            session.signups.junior.push(interaction.user.id);
-          }
-          break;
-      }
-
-      // Update message
-      await interaction.update({
-        embeds: [
-          {
-            title: '🚗 Driving Session',
-            description:
-              `**Host:** <@${session.hostId}>\n` +
-              `**Time:** ${session.time}\n` +
-              `**Duration:** ${session.duration} minutes\n\n` +
-              `**Sign-ups:**\n` +
-              `🏎️ Driver — ${session.signups.driver.length || 'None'}\n` +
-              `🎓 Trainee — ${session.signups.trainee.length || 'None'}\n` +
-              `👮 Junior Staff — ${session.signups.junior.length || 'None'}`,
-            color: 0x00bfff
-          }
-        ],
-        components: interaction.message.components
-      });
+    if (interaction.customId === 'cancel_session') {
+      sessions[guildId] = sessions[guildId].filter(id => id !== userId);
     }
-  } catch (error) {
-    console.error(error);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.editReply({ content: '❌ Something went wrong.' });
-    } else {
-      await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
-    }
+
+    // Update buttons
+    const isSignedUpNow = sessions[guildId].includes(userId);
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(isSignedUpNow ? 'cancel_session' : 'join_session')
+          .setLabel(isSignedUpNow ? 'Cancel Session' : 'Sign Up')
+          .setStyle(isSignedUpNow ? ButtonStyle.Danger : ButtonStyle.Success)
+      );
+
+    // Update participant list
+    const signedUpUsers = sessions[guildId]
+      .map(id => `<@${id}>`)
+      .join('\n') || 'No users yet.';
+
+    await interaction.update({
+      content: `${isSignedUpNow ? '✅ You signed up!' : '❌ You canceled your session.'}\n\n**Current Participants:**\n${signedUpUsers}`,
+      components: [row]
+    });
   }
 });
 
-client.once('clientReady', () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+// === Role Handling Example ===
+client.on('interactionCreate', async interaction => {
+  if (interaction.isButton() && interaction.customId.startsWith('role_')) {
+    const roleName = interaction.customId.replace('role_', '');
+    const member = interaction.member;
+    const role = interaction.guild.roles.cache.find(r => r.name === roleName);
+    if (!role) return;
+
+    // Remove all tracked roles before adding new one
+    const allRoles = ['Role1', 'Role2', 'Role3']; // Replace with your roles
+    await member.roles.remove(allRoles.filter(r => r !== roleName));
+    await member.roles.add(role);
+
+    await interaction.reply({ content: `✅ You now have the ${roleName} role!`, ephemeral: true });
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
