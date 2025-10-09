@@ -60,7 +60,7 @@ function getButtons() {
         new ButtonBuilder().setCustomId('signup_driver').setLabel(ROLE_NAMES.driver).setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('signup_trainee').setLabel(ROLE_NAMES.trainee).setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('signup_junior').setLabel(ROLE_NAMES.junior).setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('cancel_slot').setLabel('Cancel Slot').setStyle(ButtonStyle.Danger) // Allows user to remove their sign-up
+        // The 'Cancel Slot' button has been removed as requested.
     );
 
     // Session management buttons row (only Close Session in this case)
@@ -94,9 +94,9 @@ Time: ${time}
 Duration: ${duration}
 
 **Sign-ups:**
-🚗 Driver — ${sessionData.driver.map(id => `<@${id}>`).join(', ') || 'None'}
-🧑‍🎓 Trainee — ${sessionData.trainee.map(id => `<@${id}>`).join(', ') || 'None'}
-👮 Junior Staff — ${sessionData.junior.map(id => `<@${id}>`).join(', ') || 'None'}`;
+🚗 ${ROLE_NAMES.driver} — ${sessionData.driver.map(id => `<@${id}>`).join(', ') || 'None'}
+🧑‍🎓 ${ROLE_NAMES.trainee} — ${sessionData.trainee.map(id => `<@${id}>`).join(', ') || 'None'}
+👮 ${ROLE_NAMES.junior} — ${sessionData.junior.map(id => `<@${id}>`).join(', ') || 'None'}`;
         
     return { content: content };
 }
@@ -190,6 +190,13 @@ client.on(Events.InteractionCreate, async interaction => {
         if (!activeSessionMessageId || interaction.message.id !== activeSessionMessageId) {
             return interaction.editReply({ content: '❌ This sign-up is for a past session or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
         }
+        
+        // --- CRITICAL CLOSED SESSION GATE (Fix for Issue #1) ---
+        // Block all non-management actions if the session is closed.
+        if (sessionData.isClosed && interaction.customId !== 'close_session') {
+            return interaction.editReply({ content: '❌ This session is **CLOSED**. No further sign-ups or cancellations are allowed.', ephemeral: true });
+        }
+        // --- END CRITICAL CLOSED SESSION GATE ---
 
         const member = interaction.member;
         // Fetch full member data needed for role checks
@@ -209,6 +216,11 @@ client.on(Events.InteractionCreate, async interaction => {
         
         // --- Handle Close Session Button ---
         if (id === 'close_session') {
+            // If already closed, just inform the user and exit.
+            if (sessionData.isClosed) {
+                return interaction.editReply({ content: 'ℹ️ The session is already closed.', ephemeral: true });
+            }
+            
             const isHost = fullMember.id === sessionData.host;
             // Check for the "POP Staff" role
             const isStaff = fullMember.roles.cache.some(r => r.name === ROLE_NAMES.pop_staff);
@@ -224,37 +236,11 @@ client.on(Events.InteractionCreate, async interaction => {
             return updateSessionMessage();
         }
 
-        // --- Handle Cancel Slot Button (allows anyone to remove their name) ---
-        if (id === 'cancel_slot') {
-            let wasSignedUp = false;
-            
-            if (sessionData && typeof sessionData === 'object') {
-                Object.keys(roleMap).forEach(roleKey => {
-                    const roleList = sessionData[roleKey] ?? []; 
-                    const initialLength = roleList.length; 
-                    
-                    // Filter user ID out of the list
-                    const updatedList = roleList.filter(u => u !== fullMember.id);
-                    
-                    // Update sessionData and check if the length changed
-                    sessionData[roleKey] = updatedList;
-                    if (updatedList.length < initialLength) {
-                        wasSignedUp = true;
-                    }
-                });
-            }
-            
-            await interaction.editReply({ content: wasSignedUp ? '✅ You cancelled your sign-up slot.' : 'ℹ️ You were not signed up for any role.', ephemeral: true });
-            return updateSessionMessage();
-        }
+        // The 'cancel_slot' handler has been removed as the button is no longer present.
 
         const roleKey = roleMap[id];
         if (!roleKey) return interaction.deleteReply(); // Delete deferred reply
 
-        // --- Check for closed session before sign-up ---
-        if (sessionData.isClosed) {
-            return interaction.editReply({ content: '❌ This session is **CLOSED**. Sign-ups are no longer allowed.', ephemeral: true });
-        }
         
         // --- Role Check Logic ---
         const isDriverSignup = (roleKey === 'driver');
