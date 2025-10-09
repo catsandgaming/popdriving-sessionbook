@@ -14,7 +14,7 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers, // Required to fetch roles for sign-ups
-        GatewayIntentIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMessages, // Corrected typo here
         GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
