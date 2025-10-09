@@ -40,9 +40,13 @@ let sessionData = {
 const ROLE_NAMES = {
     driver: 'Driver',
     trainee: 'Trainee',
-    junior: 'Junior Staff',
+    // FIX: Updated the required role name for junior sign-up to match 'Junior Trainer' 
+    junior: 'Junior Trainer', 
     pop_staff: 'POP Staff' // Role for staff who can close any session
 };
+
+// --- List of internal role keys used in sessionData ---
+const SESSION_ROLE_KEYS = ['driver', 'trainee', 'junior'];
 
 /**
  * Conditionally returns the ActionRow components (buttons) based on the session state.
@@ -103,18 +107,13 @@ Duration: ${duration}
 
 
 /**
- * Updates the session message content and buttons in the channel.
+ * Updates the session message content and buttons using the message object provided.
+ * @param {Message} message The Discord message object to edit.
  */
-async function updateSessionMessage() {
-    if (!activeSessionMessageId || !sessionData.channelId) return;
-
+async function updateSessionMessage(message) {
+    if (!message) return; // Ensure a message object was passed
+    
     try {
-        const channel = await client.channels.fetch(sessionData.channelId);
-        if (!channel) return;
-        
-        const message = await channel.messages.fetch(activeSessionMessageId);
-        if (!message) return;
-
         const content = generateSessionContent();
         await message.edit({ ...content, components: getButtons() });
     } catch (err) {
@@ -233,7 +232,7 @@ client.on(Events.InteractionCreate, async interaction => {
             
             // Acknowledge the button click and update the message
             await interaction.editReply({ content: '✅ Session has been **CLOSED**. No further sign-ups are allowed.', ephemeral: true });
-            return updateSessionMessage();
+            return updateSessionMessage(interaction.message); // Updated call site
         }
 
         // The 'cancel_slot' handler has been removed as the button is no longer present.
@@ -275,10 +274,12 @@ client.on(Events.InteractionCreate, async interaction => {
         // If the user is eligible and either not signed up or switching roles:
         
         // 1. Remove user ID from all other role lists
-        Object.keys(roleMap).forEach(role => {
-            if (role !== roleKey) {
+        // FIX: Use the list of internal session role keys (SESSION_ROLE_KEYS) 
+        // instead of the button map keys to correctly clear the sign-ups.
+        SESSION_ROLE_KEYS.forEach(currentRoleKey => {
+            if (currentRoleKey !== roleKey) {
                 // Filter user ID out of other role lists
-                sessionData[role] = (sessionData[role] ?? []).filter(u => u !== fullMember.id);
+                sessionData[currentRoleKey] = (sessionData[currentRoleKey] ?? []).filter(u => u !== fullMember.id);
             }
         });
 
@@ -286,7 +287,7 @@ client.on(Events.InteractionCreate, async interaction => {
         sessionData[roleKey].push(fullMember.id);
 
         await interaction.editReply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**! You have been removed from any previous role.`, ephemeral: true });
-        updateSessionMessage();
+        updateSessionMessage(interaction.message); // Updated call site
     }
 });
 
