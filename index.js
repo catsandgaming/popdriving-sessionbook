@@ -86,10 +86,15 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === 'sessionbook') {
     const hostId = interaction.user.id;
+const memberRoles = interaction.member.roles.cache.map(r => r.id);
 
-    if (![SESSION_HOST_ID, ...JUNIOR_STAFF_IDS, TRAINEE_ID].includes(hostId)) {
-      return interaction.reply({ content: "🚫 You don’t have permission to create a session.", ephemeral: true });
-    }
+const allowedRoles = [SESSION_HOST_ID, ...JUNIOR_STAFF_IDS, TRAINEE_ID];
+const hasPermission = memberRoles.some(r => allowedRoles.includes(r));
+
+if (!hasPermission) {
+  return interaction.reply({ content: "🚫 You don’t have permission to create a session.", flags: 64 });
+}
+
 
     const time = interaction.options.getString('time');
     const duration = interaction.options.getString('duration');
