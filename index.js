@@ -1,138 +1,111 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-const express = require('express');
+const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, Events } = require('discord.js');
 
-const app = express();
-const PORT = process.env.PORT || 10000;
-
-app.get('/', (req, res) => {
-  res.send('Bot is running!');
-});
-
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
-
-// === Discord Bot Setup ===
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-const sessions = {}; // Store session signups
+const PORT = process.env.PORT || 10000;
+const SESSION_CHANNEL_ID = 'YOUR_CHANNEL_ID'; // Change to your channel
+const SESSION_MESSAGE_ID = 'YOUR_MESSAGE_ID'; // Change to your session message ID
 
-client.once('clientReady', () => {
-  console.log(`Logged in as ${client.user.tag}`);
+// Session data
+let sessionSignups = {
+    trainee: [],
+    junior: [],
+    driver: []
+};
+
+// Required Discord role names
+const ROLE_NAMES = {
+    trainee: 'Trainee',
+    junior: 'Junior Staff',
+    driver: 'Driver'
+};
+
+// Create buttons
+const roleButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('signup_trainee').setLabel('Trainee').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('signup_junior').setLabel('Junior Staff').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('signup_driver').setLabel('Driver').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('cancel_signup').setLabel('Cancel').setStyle(ButtonStyle.Danger)
+);
+
+client.once(Events.ClientReady, () => {
+    console.log(`Logged in as ${client.user.tag}`);
+    console.log(`Server listening on port ${PORT}`);
 });
 
-// === Commands ===
-const commands = [
-  new SlashCommandBuilder()
-    .setName('sessionbook')
-    .setDescription('Sign up, cancel, or view driving session participants')
-].map(cmd => cmd.toJSON());
-
-const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-
-(async () => {
-  try {
-    console.log('Started refreshing application (/) commands.');
-    await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
-      { body: commands }
-    );
-    console.log('Successfully reloaded application (/) commands.');
-  } catch (error) {
-    console.error(error);
-  }
-})();
-
-// === Interaction Handling ===
-client.on('interactionCreate', async interaction => {
-  if (interaction.isChatInputCommand() && interaction.commandName === 'sessionbook') {
-    const userId = interaction.user.id;
-    const guildId = interaction.guildId;
-
-    if (!sessions[guildId]) sessions[guildId] = [];
-
-    const isSignedUp = sessions[guildId].includes(userId);
-
-    const row = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId(isSignedUp ? 'cancel_session' : 'join_session')
-          .setLabel(isSignedUp ? 'Cancel Session' : 'Sign Up')
-          .setStyle(isSignedUp ? ButtonStyle.Danger : ButtonStyle.Success)
-      );
-
-    // Build list of signed-up users
-    const signedUpUsers = sessions[guildId]
-      .map(id => `<@${id}>`)
-      .join('\n') || 'No users yet.';
-
-    await interaction.reply({
-      content: `${isSignedUp ? 'You are signed up!' : 'Sign up for session!'}\n\n**Current Participants:**\n${signedUpUsers}`,
-      components: [row],
-      ephemeral: true
-    });
-  }
-
-  if (interaction.isButton()) {
-    const userId = interaction.user.id;
-    const guildId = interaction.guildId;
-
-    if (!sessions[guildId]) sessions[guildId] = [];
-
-    if (interaction.customId === 'join_session') {
-      if (!sessions[guildId].includes(userId)) sessions[guildId].push(userId);
+// Update session message
+async function updateSessionMessage(channelId, messageId) {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) return;
+    try {
+        const message = await channel.messages.fetch(messageId);
+        if (!message) return;
+        const content = `**Session Sign-ups**\n\n` +
+            `**Trainee:** ${sessionSignups.trainee.map(u => `<@${u}>`).join(', ') || 'None'}\n` +
+            `**Junior Staff:** ${sessionSignups.junior.map(u => `<@${u}>`).join(', ') || 'None'}\n` +
+            `**Driver:** ${sessionSignups.driver.map(u => `<@${u}>`).join(', ') || 'None'}`;
+        await message.edit({ content, components: [roleButtons] });
+    } catch (err) {
+        console.error('Failed to update session message:', err);
     }
+}
 
-    if (interaction.customId === 'cancel_session') {
-      sessions[guildId] = sessions[guildId].filter(id => id !== userId);
-    }
+client.on(Events.InteractionCreate, async interaction => {
+    if (!interaction.isButton()) return;
 
-    // Update buttons
-    const isSignedUpNow = sessions[guildId].includes(userId);
-    const row = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId(isSignedUpNow ? 'cancel_session' : 'join_session')
-          .setLabel(isSignedUpNow ? 'Cancel Session' : 'Sign Up')
-          .setStyle(isSignedUpNow ? ButtonStyle.Danger : ButtonStyle.Success)
-      );
-
-    // Update participant list
-    const signedUpUsers = sessions[guildId]
-      .map(id => `<@${id}>`)
-      .join('\n') || 'No users yet.';
-
-    await interaction.update({
-      content: `${isSignedUpNow ? '✅ You signed up!' : '❌ You canceled your session.'}\n\n**Current Participants:**\n${signedUpUsers}`,
-      components: [row]
-    });
-  }
-});
-
-// === Role Handling Example ===
-client.on('interactionCreate', async interaction => {
-  if (interaction.isButton() && interaction.customId.startsWith('role_')) {
-    const roleName = interaction.customId.replace('role_', '');
     const member = interaction.member;
-    const role = interaction.guild.roles.cache.find(r => r.name === roleName);
-    if (!role) return;
 
-    // Remove all tracked roles before adding new one
-    const allRoles = ['Role1', 'Role2', 'Role3']; // Replace with your roles
-    await member.roles.remove(allRoles.filter(r => r !== roleName));
-    await member.roles.add(role);
+    if (!member) return interaction.reply({ content: 'Unable to fetch member info.', ephemeral: true });
 
-    await interaction.reply({ content: `✅ You now have the ${roleName} role!`, ephemeral: true });
-  }
+    const id = interaction.customId;
+
+    // Map button click to role
+    const roleMap = {
+        signup_trainee: 'trainee',
+        signup_junior: 'junior',
+        signup_driver: 'driver',
+    };
+
+    if (id === 'cancel_signup') {
+        // Remove user from all lists
+        Object.keys(sessionSignups).forEach(role => {
+            sessionSignups[role] = sessionSignups[role].filter(u => u !== member.id);
+        });
+        await interaction.reply({ content: '✅ You have cancelled your sign-up.', ephemeral: true });
+        return updateSessionMessage(SESSION_CHANNEL_ID, SESSION_MESSAGE_ID);
+    }
+
+    const selectedRole = roleMap[id];
+    if (!selectedRole) return;
+
+    // Check if member has required role
+    const requiredRoleName = ROLE_NAMES[selectedRole];
+    const hasRole = member.roles.cache.some(r => r.name === requiredRoleName);
+    if (!hasRole) {
+        return interaction.reply({ content: `❌ You do not have the required role: ${requiredRoleName}`, ephemeral: true });
+    }
+
+    // Remove user from other roles
+    Object.keys(sessionSignups).forEach(role => {
+        if (role !== selectedRole) {
+            sessionSignups[role] = sessionSignups[role].filter(u => u !== member.id);
+        }
+    });
+
+    // Add user to selected role if not already
+    if (!sessionSignups[selectedRole].includes(member.id)) {
+        sessionSignups[selectedRole].push(member.id);
+    }
+
+    await interaction.reply({ content: `✅ You have signed up as ${requiredRoleName}.`, ephemeral: true });
+
+    // Update session message
+    updateSessionMessage(SESSION_CHANNEL_ID, SESSION_MESSAGE_ID);
 });
 
+// Login
 client.login(process.env.DISCORD_TOKEN);
