@@ -7,29 +7,23 @@ const {
     ButtonBuilder, 
     ButtonStyle, 
     Events,
-    // EmbedBuilder is included but not used, as we are prioritizing simple text output
 } = require('discord.js');
 
 const client = new Client({
     intents: [
-        // Required for basic bot functionality
         GatewayIntentBits.Guilds,
-        // Required to fetch members for sign-up and role checks
-        GatewayIntentBits.GuildMembers,
-        // Required to read/send messages and command interactions
+        GatewayIntentBits.GuildMembers, // CRITICAL: Required for checking user roles
         GatewayIntentBits.GuildMessages,
-        // Required for reading message content (not strictly needed for slash commands, but good practice)
         GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
 // The ID of the channel where sessions should be posted.
-// Replace 'YOUR_CHANNEL_ID_HERE' with the channel ID if you want to restrict the command.
 const SESSION_CHANNEL_ID = 'YOUR_CHANNEL_ID_HERE'; 
 
 // --- In-memory Session State ---
-// This variable holds the ID of the message for the CURRENT active session
+// This ID tracks the ONLY message currently active for sign-ups.
 let activeSessionMessageId = null; 
 
 // Session data structure (will be reset for each new session)
@@ -42,8 +36,7 @@ let sessionData = {
     junior: []
 };
 
-// Role names mapping (Used for button labels and checking user permissions)
-// **IMPORTANT**: These names MUST exactly match the role names in your Discord server.
+// Role names mapping (MUST exactly match the role names in your Discord server.)
 const ROLE_NAMES = {
     driver: 'Driver',
     trainee: 'Trainee',
@@ -66,15 +59,17 @@ client.once(Events.ClientReady, () => {
 
 /**
  * Generates the content of the session message based on current sessionData.
- * The output is a simple text string, matching the clean style you requested.
  * @returns {object} The message payload (content string).
  */
 function generateSessionContent() {
-    // Uses template literals for clean formatting
+    // Check for null values gracefully, although the command inputs should prevent this.
+    const time = sessionData.time || 'TBD';
+    const duration = sessionData.duration || 'TBD';
+
     const content = `🚗 **Driving Session**
 Host: ${sessionData.host ? `<@${sessionData.host}>` : 'TBD'}
-Time: ${sessionData.time}
-Duration: ${sessionData.duration}
+Time: ${time}
+Duration: ${duration}
 
 **Sign-ups:**
 🚗 Driver — ${sessionData.driver.length}
@@ -89,7 +84,7 @@ Duration: ${sessionData.duration}
  * Updates the session message content and buttons in the channel.
  */
 async function updateSessionMessage() {
-    if (!activeSessionMessageId) return; // No active session to update
+    if (!activeSessionMessageId) return;
 
     const channel = await client.channels.fetch(SESSION_CHANNEL_ID);
     if (!channel) return;
@@ -99,10 +94,9 @@ async function updateSessionMessage() {
         if (!message) return;
 
         const content = generateSessionContent();
-        // Edit the existing message with new content and buttons
         await message.edit({ ...content, components: [buttons] });
     } catch (err) {
-        // If the message was deleted by a user, we clear the active ID
+        // If the message was deleted or fetch failed, clear the active ID.
         console.error('Failed to update session message (it might have been manually deleted):', err.message);
         activeSessionMessageId = null; 
     }
@@ -111,7 +105,6 @@ async function updateSessionMessage() {
 
 // --- Command Handling for /sessionbook ---
 client.on(Events.InteractionCreate, async interaction => {
-    // Only process slash commands
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
@@ -122,7 +115,7 @@ client.on(Events.InteractionCreate, async interaction => {
              return interaction.reply({ content: `❌ Please use this command in the designated session channel.`, ephemeral: true });
         }
 
-        // 1. Get dynamic inputs from the command (Time, Duration are guaranteed to exist as they are setRequired(true) in deploy-commands.js)
+        // 1. Get dynamic inputs
         const time = interaction.options.getString('time');
         const duration = interaction.options.getString('duration');
         const hostUser = interaction.options.getUser('host') || interaction.user;
@@ -139,7 +132,7 @@ client.on(Events.InteractionCreate, async interaction => {
         };
         activeSessionMessageId = null; // Prepare for new message
 
-        // 3. Confirm the command execution (ephemeral means only the user sees this)
+        // 3. Confirm the command execution
         await interaction.reply({ content: `✅ New session started by <@${hostId}>!`, ephemeral: true });
         
         // 4. Send the main interactive message
@@ -149,7 +142,7 @@ client.on(Events.InteractionCreate, async interaction => {
             components: [buttons] 
         });
 
-        // 5. Store the new message ID to track sign-ups on it
+        // 5. Store the new message ID
         activeSessionMessageId = sessionMessage.id;
         console.log(`New session message created with ID: ${activeSessionMessageId}`);
     }
@@ -160,12 +153,12 @@ client.on(Events.InteractionCreate, async interaction => {
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isButton()) return;
     
-    // Crucial check: only interact with the CURRENT active session message
-    if (interaction.message.id !== activeSessionMessageId) {
-        return interaction.reply({ content: '❌ This sign-up is for a past session. Please use the newest one.', ephemeral: true });
+    // CRITICAL FIX: If the bot restarted, activeSessionMessageId will be null.
+    // We check if the clicked message ID matches the active one.
+    if (!activeSessionMessageId || interaction.message.id !== activeSessionMessageId) {
+        return interaction.reply({ content: '❌ This sign-up is for a past session, or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
     }
 
-    // Get the member object to check roles
     const member = interaction.member;
     if (!member) return interaction.reply({ content: 'Cannot fetch member info.', ephemeral: true });
 
@@ -178,14 +171,19 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (id === 'cancel_signup') {
         let wasSignedUp = false;
-        // Remove from all roles
-        Object.keys(roleMap).forEach(roleKey => {
-            const initialLength = sessionData[roleKey].length;
-            sessionData[roleKey] = sessionData[roleKey].filter(u => u !== member.id);
-            if (sessionData[roleKey].length < initialLength) {
-                wasSignedUp = true;
-            }
-        });
+        // Fix for the TypeError: Cannot read properties of undefined (reading 'length')
+        // Ensure sessionData is valid before iterating
+        if (sessionData && typeof sessionData === 'object') {
+            Object.keys(roleMap).forEach(roleKey => {
+                const initialLength = sessionData[roleKey]?.length || 0; // Use optional chaining and default to 0
+                if (sessionData[roleKey]) {
+                    sessionData[roleKey] = sessionData[roleKey].filter(u => u !== member.id);
+                    if (sessionData[roleKey].length < initialLength) {
+                        wasSignedUp = true;
+                    }
+                }
+            });
+        }
         
         await interaction.reply({ content: wasSignedUp ? '✅ You cancelled your sign-up.' : 'ℹ️ You were not signed up for any role.', ephemeral: true });
         return updateSessionMessage();
@@ -201,7 +199,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // Check if member has the Discord role before signing up
     const requiredRoleName = ROLE_NAMES[roleKey];
-    // This assumes the bot has the GUILD_MEMBERS intent and necessary permissions
     const hasRequiredRole = member.roles.cache.some(r => r.name === requiredRoleName);
 
     if (!hasRequiredRole) {
