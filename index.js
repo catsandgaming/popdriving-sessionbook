@@ -14,7 +14,7 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers, // Required to fetch roles for sign-ups
-        GatewayIntentBits.GuildMessages,
+        GatewayIntentIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
@@ -220,12 +220,18 @@ client.on(Events.InteractionCreate, async interaction => {
             
             if (sessionData && typeof sessionData === 'object') {
                 Object.keys(roleMap).forEach(roleKey => {
-                    const initialLength = sessionData[roleKey]?.length || 0; 
-                    if (sessionData[roleKey]) {
-                        sessionData[roleKey] = sessionData[roleKey].filter(u => u !== fullMember.id);
-                        if (sessionData[roleKey].length < initialLength) {
-                            wasSignedUp = true;
-                        }
+                    // Check if sessionData[roleKey] is defined (it should be, but this protects against the error)
+                    // If it's null/undefined, default to an empty array [] before filtering.
+                    const roleList = sessionData[roleKey] ?? []; 
+                    const initialLength = roleList.length; 
+                    
+                    // Filter user ID out of the list
+                    const updatedList = roleList.filter(u => u !== fullMember.id);
+                    
+                    // Update sessionData and check if the length changed
+                    sessionData[roleKey] = updatedList;
+                    if (updatedList.length < initialLength) {
+                        wasSignedUp = true;
                     }
                 });
             }
@@ -243,7 +249,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         
         // Check if the user is already signed up for this role
-        if (sessionData[roleKey].includes(fullMember.id)) {
+        if (sessionData[roleKey]?.includes(fullMember.id)) { // Added optional chaining here for safety
             return interaction.reply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
         }
 
@@ -268,8 +274,8 @@ client.on(Events.InteractionCreate, async interaction => {
         // --- Core Sign-up Logic: Sign up for the chosen role and remove from others ---
         Object.keys(roleMap).forEach(role => {
             if (role !== roleKey) {
-                // Filter user ID out of other role lists
-                sessionData[role] = sessionData[role].filter(u => u !== fullMember.id);
+                // Filter user ID out of other role lists, safely using empty array if sessionData[role] is missing
+                sessionData[role] = (sessionData[role] ?? []).filter(u => u !== fullMember.id);
             }
         });
 
