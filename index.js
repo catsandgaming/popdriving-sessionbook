@@ -1,134 +1,102 @@
+// --- Imports ---
 require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
-  Partials,
   SlashCommandBuilder,
+  REST,
   Routes,
-  EmbedBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  PermissionsBitField,
-  Collection,
+  PermissionFlagsBits,
+  EmbedBuilder
 } = require('discord.js');
-const { REST } = require('@discordjs/rest');
 const fs = require('fs');
-const path = require('path');
 
-const TOKEN = process.env.TOKEN;
+// --- Environment Variables ---
+const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
-const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 
-// --- Create Discord client ---
+// Role-based limits
+const JUNIOR_STAFF_IDS = (process.env.JUNIOR_STAFF_IDS || "").split(",");
+const SESSION_HOST_ID = process.env.SESSION_HOST_ID;
+const TRAINEE_ID = process.env.TRAINEE_ID;
+
+// --- Discord Client Setup ---
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-  partials: [Partials.Message, Partials.Channel],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// --- Load or initialize sessions.json ---
-let sessions = {};
-try {
-  if (fs.existsSync(SESSIONS_FILE)) {
-    sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE));
-  } else {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify({}));
-  }
-} catch (err) {
-  console.error('Error loading sessions.json:', err);
-}
-
-// --- Define slash command /sessionbook ---
+// --- Command Definition ---
 const sessionBookCommand = new SlashCommandBuilder()
   .setName('sessionbook')
-  .setDescription('Book a driving session with a time and duration.')
+  .setDescription('📘 Book a new driving session (host-only)')
   .addStringOption(option =>
     option
       .setName('time')
-      .setDescription('The start time of the session (e.g., 10:00, 14:30)')
-      .setRequired(true),
+      .setDescription('Start time (e.g. 14:00 or 2PM)')
+      .setRequired(true)
   )
   .addStringOption(option =>
     option
       .setName('duration')
-      .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
-      .setRequired(true),
-  );
+      .setDescription('Duration (e.g. 30 minutes, 1 hour)')
+      .setRequired(true)
+  )
+  .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages);
 
-// --- On bot ready ---
+// --- Register Slash Commands ---
+async function registerCommands() {
+  try {
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    const data = [sessionBookCommand.toJSON()];
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: data });
+    console.log('✅ Global command /sessionbook registered successfully.');
+  } catch (err) {
+    console.error('❌ Failed to register commands:', err);
+  }
+}
+
+// --- When Bot is Ready ---
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-
-  try {
-    console.log('Attempting to aggressively clean up and register global commands...');
-    await client.application.commands.set([sessionBookCommand]);
-    console.log('✅ /sessionbook command registered successfully.');
-  } catch (error) {
-    console.error('❌ Failed to register commands:', error);
-  }
+  await registerCommands();
 });
 
-// --- Handle interactions ---
-client.on('interactionCreate', async interaction => {
+// --- Handle Interactions ---
+client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
-  const { commandName, options, member, channel } = interaction;
+  const { commandName, member } = interaction;
 
   if (commandName === 'sessionbook') {
-    await interaction.deferReply({ ephemeral: true });
+    const userRoles = member.roles.cache.map(r => r.id);
 
-    // --- Gather inputs ---
-    const time = options.getString('time');
-    const duration = options.getString('duration');
+    // --- Permission Check ---
+    const isAllowed =
+      userRoles.includes(SESSION_HOST_ID) ||
+      userRoles.some(r => JUNIOR_STAFF_IDS.includes(r)) ||
+      userRoles.includes(TRAINEE_ID);
 
-    // --- Validate ---
-    if (!time || !duration) {
-      console.error('Missing time or duration:', { time, duration });
-      return interaction.editReply({
-        content:
-          '❌ The system could not read the **Time** or **Duration** fields. Please retype `/sessionbook` and try again.',
+    if (!isAllowed) {
+      return interaction.reply({
+        content: '❌ You do not have permission to start a session. Only authorized staff may use this command.',
+        ephemeral: true
       });
     }
 
-    const channelId = interaction.channelId;
-    const hostId = member.id;
+    const time = interaction.options.getString('time');
+    const duration = interaction.options.getString('duration');
 
-    // --- Build embed ---
+    // --- Create Embed ---
     const embed = new EmbedBuilder()
-      .setColor('#00BFFF')
-      .setTitle('🚗 New Driving Session Booked')
-      .addFields(
-        { name: '🕒 Time', value: time, inline: true },
-        { name: '⏱ Duration', value: duration, inline: true },
-        { name: '👤 Host', value: `<@${hostId}>`, inline: true },
-      )
-      .setFooter({ text: 'Pop Driving Session System' })
+      .setTitle('🚗 Driving Session Booked!')
+      .setDescription(`**Host:** ${member.displayName}\n**Time:** ${time}\n**Duration:** ${duration}`)
+      .setColor(0x00AE86)
       .setTimestamp();
 
-    try {
-      // --- Post in channel ---
-      await channel.send({ embeds: [embed] });
-
-      // --- Save session ---
-      sessions[channelId] = { time, duration, hostId };
-      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
-
-      return interaction.editReply({
-        content: '✅ Your session has been booked and posted successfully!',
-      });
-    } catch (error) {
-      console.error('Error posting session:', error);
-      return interaction.editReply({
-        content:
-          '❌ An error occurred while posting the session. Please check bot permissions and try again.',
-      });
-    }
+    await interaction.reply({ embeds: [embed] });
+    console.log(`📘 Session booked by ${member.displayName}: ${time} for ${duration}`);
   }
 });
 
-// --- Login ---
+// --- Start Bot ---
 client.login(TOKEN);
