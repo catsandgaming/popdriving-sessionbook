@@ -1,442 +1,134 @@
-@@ -1,21 +1,21 @@
-// --- PHASE 3: BOT SETUP AND COMMANDS (index.js) ---
-
-// Load environment variables (like the BOT_TOKEN and Role IDs) from the .env file
 require('dotenv').config();
-const fs = require('fs');
-// Include the standard HTTP module needed for the Render web server
-const http = require('http'); 
-const { 
-    Client, 
-    GatewayIntentBits, 
-    SlashCommandBuilder, 
-    EmbedBuilder, 
-    ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle, 
-    PermissionsBitField, 
-    MessageFlags, // Used for ephemeral replacement
-    Collection 
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  SlashCommandBuilder,
+  Routes,
+  EmbedBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  PermissionsBitField,
+  Collection,
 } = require('discord.js');
+const { REST } = require('@discordjs/rest');
+const fs = require('fs');
+const path = require('path');
 
-// --- Configuration Constants from .env ---
-@@ -348,6 +348,16 @@
-            // --- 2. Gather Command Options (Only Time and Duration) ---
-            const time = options.getString('time');
-            const duration = options.getString('duration');
-            
-            // --- DEFENSIVE CHECK AGAINST STALE COMMANDS ---
-            if (!time || !duration) {
-                console.error('Command failed to retrieve options. Time or Duration is missing.', { time, duration });
-                return interaction.editReply({ 
-                    content: '❌ Command Error: The system failed to read the **Time** or **Duration** fields. Please ensure you are using the command that shows **Time** and **Duration** as required inputs. You might need to refresh Discord (Ctrl+R/Cmd+R).', 
-                    ephemeral: true 
-                });
-            }
-            
-            const channelId = interaction.channelId; 
-            const hostId = member.id;
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 
-@@ -392,21 +402,6 @@
-                console.error('Error sending session message or saving data:', error);
-                return interaction.editReply({ content: '❌ An error occurred while posting the session. Please check bot permissions and try again.' });
-            
-        }
-    } else if (interaction.isButton()) {
-        await handleButtonInteraction(interaction);
-@@ -432,22 +427,16 @@
-                .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
-                .setRequired(true));
+// --- Create Discord client ---
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Message, Partials.Channel],
+});
 
+// --- Load or initialize sessions.json ---
+let sessions = {};
+try {
+  if (fs.existsSync(SESSIONS_FILE)) {
+    sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE));
+  } else {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify({}));
+  }
+} catch (err) {
+  console.error('Error loading sessions.json:', err);
+}
 
+// --- Define slash command /sessionbook ---
+const sessionBookCommand = new SlashCommandBuilder()
+  .setName('sessionbook')
+  .setDescription('Book a driving session with a time and duration.')
+  .addStringOption(option =>
+    option
+      .setName('time')
+      .setDescription('The start time of the session (e.g., 10:00, 14:30)')
+      .setRequired(true),
+  )
+  .addStringOption(option =>
+    option
+      .setName('duration')
+      .setDescription('The expected length of the session (e.g., 1 hour, 30 minutes)')
+      .setRequired(true),
+  );
 
-    // Array of commands we want to exist
-    const commandsToRegister = [sessionBookCommand]; // Only the correct command
+// --- On bot ready ---
+client.once('ready', async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+
+  try {
+    console.log('Attempting to aggressively clean up and register global commands...');
+    await client.application.commands.set([sessionBookCommand]);
+    console.log('✅ /sessionbook command registered successfully.');
+  } catch (error) {
+    console.error('❌ Failed to register commands:', error);
+  }
+});
+
+// --- Handle interactions ---
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName, options, member, channel } = interaction;
+
+  if (commandName === 'sessionbook') {
+    await interaction.deferReply({ ephemeral: true });
+
+    // --- Gather inputs ---
+    const time = options.getString('time');
+    const duration = options.getString('duration');
+
+    // --- Validate ---
+    if (!time || !duration) {
+      console.error('Missing time or duration:', { time, duration });
+      return interaction.editReply({
+        content:
+          '❌ The system could not read the **Time** or **Duration** fields. Please retype `/sessionbook` and try again.',
+      });
+    }
+
+    const channelId = interaction.channelId;
+    const hostId = member.id;
+
+    // --- Build embed ---
+    const embed = new EmbedBuilder()
+      .setColor('#00BFFF')
+      .setTitle('🚗 New Driving Session Booked')
+      .addFields(
+        { name: '🕒 Time', value: time, inline: true },
+        { name: '⏱ Duration', value: duration, inline: true },
+        { name: '👤 Host', value: `<@${hostId}>`, inline: true },
+      )
+      .setFooter({ text: 'Pop Driving Session System' })
+      .setTimestamp();
 
     try {
-        console.log('Attempting to aggressively clean up and register global commands...');
-
-        // This command set operation clears ALL existing global commands and replaces them.
-        await client.application.commands.set(commandsToRegister);
-
-        console.log('Global command /sessionbook registered successfully. Please hard refresh Discord (Ctrl+R/Cmd+R).');
-
-        // Log the final state of commands for console verification
-        const finalCommands = await client.application.commands.fetch();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // --- Post in channel ---
+      await channel.send({ embeds: [embed] });
+
+      // --- Save session ---
+      sessions[channelId] = { time, duration, hostId };
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+
+      return interaction.editReply({
+        content: '✅ Your session has been booked and posted successfully!',
+      });
+    } catch (error) {
+      console.error('Error posting session:', error);
+      return interaction.editReply({
+        content:
+          '❌ An error occurred while posting the session. Please check bot permissions and try again.',
+      });
+    }
+  }
+});
+
+// --- Login ---
+client.login(TOKEN);
