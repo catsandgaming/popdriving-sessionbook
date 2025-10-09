@@ -9,10 +9,11 @@ const {
     Events,
 } = require('discord.js');
 
+// 1. Initialize Discord Client with necessary intents for roles and guild info
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers, 
+        GatewayIntentBits.GuildMembers, // Required to fetch roles for sign-ups
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
     ],
@@ -20,46 +21,52 @@ const client = new Client({
 });
 
 // --- In-memory Session State ---
+// This stores the state of the *most recent* session message posted by the bot.
 let activeSessionMessageId = null; 
 
 let sessionData = {
     channelId: null, 
     host: null,
     time: null,
-    duration: null, // RESTORED: Duration
+    duration: null, 
     driver: [],
     trainee: [],
     junior: [],
     isClosed: false 
 };
 
+// --- Configuration ---
+// These role names must EXACTLY match the role names on your Discord server (case-sensitive).
 const ROLE_NAMES = {
     driver: 'Driver',
     trainee: 'Trainee',
     junior: 'Junior Staff',
-    pop_staff: 'POP Staff'
+    pop_staff: 'POP Staff' // Role for staff who can close any session
 };
 
 /**
- * Conditionally returns the ActionRow components based on the session state.
+ * Conditionally returns the ActionRow components (buttons) based on the session state.
+ * If the session is closed, no buttons are returned.
  * @returns {ActionRowBuilder[]} An array of ActionRowBuilders containing buttons.
  */
 function getButtons() {
+    // ⛔ If the session is closed, remove all buttons. 
+    if (sessionData.isClosed) {
+        return []; 
+    }
+
+    // Sign-up buttons row
     const signUpButtons = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('signup_driver').setLabel(ROLE_NAMES.driver).setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('signup_trainee').setLabel(ROLE_NAMES.trainee).setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('signup_junior').setLabel(ROLE_NAMES.junior).setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('cancel_slot').setLabel('Cancel Slot').setStyle(ButtonStyle.Danger) 
+        new ButtonBuilder().setCustomId('cancel_slot').setLabel('Cancel Slot').setStyle(ButtonStyle.Danger) // Allows user to remove their sign-up
     );
 
+    // Session management buttons row (only Close Session in this case)
     const managementButton = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('close_session').setLabel('Close Session').setStyle(ButtonStyle.Danger) 
     );
-
-    // If the session is closed, remove sign-up buttons, only keep management button
-    if (sessionData.isClosed) {
-        return []; // We can remove the management button too, to fully lock it.
-    }
     
     // If open, show all buttons
     return [signUpButtons, managementButton];
@@ -76,7 +83,6 @@ client.once(Events.ClientReady, () => {
  * @returns {object} The message payload (content string).
  */
 function generateSessionContent() {
-    // RESTORED: Use time and duration
     const time = sessionData.time || 'TBD';
     const duration = sessionData.duration || 'TBD';
 
@@ -88,9 +94,9 @@ Time: ${time}
 Duration: ${duration}
 
 **Sign-ups:**
-🚗 Driver — ${sessionData.driver.length}
-🧑‍🎓 Trainee — ${sessionData.trainee.length}
-👮 Junior Staff — ${sessionData.junior.length}`;
+🚗 Driver — ${sessionData.driver.map(id => `<@${id}>`).join(', ') || 'None'}
+🧑‍🎓 Trainee — ${sessionData.trainee.map(id => `<@${id}>`).join(', ') || 'None'}
+👮 Junior Staff — ${sessionData.junior.map(id => `<@${id}>`).join(', ') || 'None'}`;
         
     return { content: content };
 }
@@ -102,17 +108,18 @@ Duration: ${duration}
 async function updateSessionMessage() {
     if (!activeSessionMessageId || !sessionData.channelId) return;
 
-    const channel = await client.channels.fetch(sessionData.channelId);
-    if (!channel) return;
-    
     try {
+        const channel = await client.channels.fetch(sessionData.channelId);
+        if (!channel) return;
+        
         const message = await channel.messages.fetch(activeSessionMessageId);
         if (!message) return;
 
         const content = generateSessionContent();
         await message.edit({ ...content, components: getButtons() });
     } catch (err) {
-        console.error('Failed to update session message (it might have been manually deleted or bot restarted):', err.message);
+        // Log errors but prevent bot crash if message is deleted or channel is inaccessible
+        console.error('Failed to update session message:', err.message);
         activeSessionMessageId = null; 
     }
 }
@@ -124,13 +131,12 @@ client.on(Events.InteractionCreate, async interaction => {
         const { commandName } = interaction;
 
         if (commandName === 'sessionbook') {
-            // RESTORED: Get time and duration
             const time = interaction.options.getString('time');
             const duration = interaction.options.getString('duration');
             const hostUser = interaction.options.getUser('host') || interaction.user;
             const hostId = hostUser.id;
 
-            // 1. Acknowledge the command immediately to avoid timeout (CRITICAL)
+            // CRITICAL: Acknowledge the command immediately to avoid the "Unknown interaction" (10062) timeout
             await interaction.deferReply({ ephemeral: true });
 
             // 2. Reset and update global session state
@@ -138,7 +144,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 channelId: interaction.channelId, 
                 host: hostId,
                 time: time,
-                duration: duration, // RESTORED: Store duration
+                duration: duration, 
                 driver: [],
                 trainee: [],
                 junior: [],
@@ -147,29 +153,40 @@ client.on(Events.InteractionCreate, async interaction => {
             activeSessionMessageId = null;
 
             // 3. Send the main interactive message
-            const channel = interaction.channel;
-            const sessionMessage = await channel.send({ 
-                ...generateSessionContent(), 
-                components: getButtons() 
-            });
+            try {
+                const channel = interaction.channel;
+                const sessionMessage = await channel.send({ 
+                    ...generateSessionContent(), 
+                    components: getButtons() 
+                });
 
-            // 4. Store the new message ID
-            activeSessionMessageId = sessionMessage.id;
+                // 4. Store the new message ID
+                activeSessionMessageId = sessionMessage.id;
 
-            // 5. Edit the initial reply to show success
-            return interaction.editReply({ content: `✅ New session started by <@${hostId}>!` });
+                // 5. Edit the initial reply to show success
+                return interaction.editReply({ content: `✅ New session started by <@${hostId}>!` });
+            } catch (err) {
+                console.error('Failed to send session message:', err.message);
+                return interaction.editReply({ content: '❌ Error starting session. Check bot permissions and ensure the channel is valid.' });
+            }
         }
     }
 
     if (interaction.isButton()) {
-        // Button interactions should still work even if the bot restarted, 
-        // as long as the message is the currently active one.
+        
+        // 1. Check for Active Session and Timeout
         if (!activeSessionMessageId || interaction.message.id !== activeSessionMessageId) {
             return interaction.reply({ content: '❌ This sign-up is for a past session or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
         }
 
         const member = interaction.member;
-        if (!member) return interaction.reply({ content: 'Cannot fetch member info.', ephemeral: true });
+        // Fetch full member data needed for role checks
+        const fullMember = await interaction.guild.members.fetch(member.id).catch(e => {
+            console.error('Could not fetch member for role check:', e.message);
+        });
+
+        if (!fullMember) return interaction.reply({ content: 'Cannot fetch member info for role verification.', ephemeral: true });
+
 
         const id = interaction.customId;
         const roleMap = {
@@ -180,9 +197,9 @@ client.on(Events.InteractionCreate, async interaction => {
         
         // --- Handle Close Session Button ---
         if (id === 'close_session') {
-            const isHost = member.id === sessionData.host;
-            // Ensure the roles are correctly fetched (using the cached version from the member object)
-            const isStaff = member.roles.cache.some(r => r.name === ROLE_NAMES.pop_staff);
+            const isHost = fullMember.id === sessionData.host;
+            // Check for the "POP Staff" role
+            const isStaff = fullMember.roles.cache.some(r => r.name === ROLE_NAMES.pop_staff);
 
             if (!isHost && !isStaff) {
                 return interaction.reply({ content: `❌ Only the host or a **${ROLE_NAMES.pop_staff}** member can close this session.`, ephemeral: true });
@@ -190,11 +207,12 @@ client.on(Events.InteractionCreate, async interaction => {
             
             sessionData.isClosed = true;
             
-            await interaction.reply({ content: '✅ Session has been CLOSED. No further sign-ups are allowed.', ephemeral: true });
+            // Acknowledge the button click and update the message
+            await interaction.reply({ content: '✅ Session has been **CLOSED**. No further sign-ups are allowed.', ephemeral: true });
             return updateSessionMessage();
         }
 
-        // --- Handle Cancel Slot Button (was cancel_signup) ---
+        // --- Handle Cancel Slot Button (allows anyone to remove their name) ---
         if (id === 'cancel_slot') {
             let wasSignedUp = false;
             
@@ -202,7 +220,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 Object.keys(roleMap).forEach(roleKey => {
                     const initialLength = sessionData[roleKey]?.length || 0; 
                     if (sessionData[roleKey]) {
-                        sessionData[roleKey] = sessionData[roleKey].filter(u => u !== member.id);
+                        sessionData[roleKey] = sessionData[roleKey].filter(u => u !== fullMember.id);
                         if (sessionData[roleKey].length < initialLength) {
                             wasSignedUp = true;
                         }
@@ -219,21 +237,23 @@ client.on(Events.InteractionCreate, async interaction => {
 
         // --- Check for closed session before sign-up ---
         if (sessionData.isClosed) {
-            return interaction.reply({ content: '❌ This session is CLOSED. Sign-ups are no longer allowed.', ephemeral: true });
+            return interaction.reply({ content: '❌ This session is **CLOSED**. Sign-ups are no longer allowed.', ephemeral: true });
         }
         
         // Check if the user is already signed up for this role
-        if (sessionData[roleKey].includes(member.id)) {
+        if (sessionData[roleKey].includes(fullMember.id)) {
             return interaction.reply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
         }
 
         // --- Role Check Logic ---
         const isDriverSignup = (roleKey === 'driver');
         
+        // **Driver role allows everyone (no role check)**
+
         if (!isDriverSignup) {
             // Trainee and Junior Staff require the matching role
             const requiredRoleName = ROLE_NAMES[roleKey];
-            const hasRequiredRole = member.roles.cache.some(r => r.name === requiredRoleName);
+            const hasRequiredRole = fullMember.roles.cache.some(r => r.name === requiredRoleName);
 
             if (!hasRequiredRole) {
                 return interaction.reply({ 
@@ -243,14 +263,16 @@ client.on(Events.InteractionCreate, async interaction => {
             }
         }
         
-        // --- Core Sign-up Logic ---
+        // --- Core Sign-up Logic: Sign up for the chosen role and remove from others ---
         Object.keys(roleMap).forEach(role => {
             if (role !== roleKey) {
-                sessionData[role] = sessionData[role].filter(u => u !== member.id);
+                // Filter user ID out of other role lists
+                sessionData[role] = sessionData[role].filter(u => u !== fullMember.id);
             }
         });
 
-        sessionData[roleKey].push(member.id);
+        // Add user ID to the new role list
+        sessionData[roleKey].push(fullMember.id);
 
         await interaction.reply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**!`, ephemeral: true });
         updateSessionMessage();
