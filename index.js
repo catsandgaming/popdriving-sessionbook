@@ -16,160 +16,168 @@ const fs = require('fs');
 // --- Environment Variables ---
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const JUNIOR_STAFF_IDS = (process.env.JUNIOR_STAFF_IDS || "").split(",").map(x => x.trim());
+const GUILD_ID = process.env.GUILD_ID;
 const SESSION_HOST_ID = process.env.SESSION_HOST_ID;
+const JUNIOR_STAFF_IDS = (process.env.JUNIOR_STAFF_IDS || "").split(",").map(x => x.trim());
 const TRAINEE_ID = process.env.TRAINEE_ID;
 
-// --- Discord Client Setup ---
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
+const DATA_FILE = 'sessions.json';
 
-// --- Session Data Management ---
-const DATA_FILE = "sessions.json";
-
+// --- Utility Functions ---
 function loadSessions() {
   if (!fs.existsSync(DATA_FILE)) return {};
-  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 }
-
 function saveSessions(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// --- Slash Command Definition ---
+// --- Discord Client ---
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
+
+// --- Slash Command ---
 const sessionBookCommand = new SlashCommandBuilder()
-  .setName("sessionbook")
-  .setDescription("Create a new driving session with signups.")
+  .setName('sessionbook')
+  .setDescription('Create a new driving session.')
   .addStringOption(opt =>
-    opt.setName("time").setDescription("Start time (e.g. 18:30)").setRequired(true)
+    opt.setName('time').setDescription('Start time (e.g. 18:30)').setRequired(true)
   )
   .addStringOption(opt =>
-    opt.setName("duration").setDescription("Duration in minutes").setRequired(true)
+    opt.setName('duration').setDescription('Duration in minutes').setRequired(true)
   );
 
-// --- Register Slash Commands ---
+// --- Register Commands ---
 async function registerCommands() {
   try {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [sessionBookCommand.toJSON()] });
-    console.log('✅ Global command /sessionbook registered successfully.');
+    console.log('✅ Registered /sessionbook command.');
   } catch (err) {
     console.error('❌ Failed to register commands:', err);
   }
 }
 
-// --- When Bot is Ready ---
+// --- When Bot Ready ---
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();
 });
 
-// --- Handle Slash Command Execution ---
-client.on('interactionCreate', async (interaction) => {
+// --- Handle Slash Command ---
+client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== 'sessionbook') return;
 
-  if (interaction.commandName === 'sessionbook') {
-    const member = interaction.member;
-    const userRoles = member.roles.cache.map(r => r.id);
-    const time = interaction.options.getString('time');
-    const duration = interaction.options.getString('duration');
+  const member = interaction.member;
+  const userRoles = member.roles.cache.map(r => r.id);
 
-    // Permission check
-    const isAllowed =
-      userRoles.includes(SESSION_HOST_ID) ||
-      userRoles.some(r => JUNIOR_STAFF_IDS.includes(r)) ||
-      userRoles.includes(TRAINEE_ID);
+  const isAllowed =
+    userRoles.includes(SESSION_HOST_ID) ||
+    userRoles.some(r => JUNIOR_STAFF_IDS.includes(r)) ||
+    userRoles.includes(TRAINEE_ID);
 
-    if (!isAllowed) {
-      return interaction.reply({
-        content: '🚫 You do not have permission to start a session. Only authorized staff may use this command.',
-        ephemeral: true
-      });
-    }
+  if (!isAllowed) {
+    return interaction.reply({
+      content: '🚫 You do not have permission to start a session.',
+      ephemeral: true
+    });
+  }
 
-    const host = interaction.user;
-    const sessionId = interaction.id;
-    const sessions = loadSessions();
+  const time = interaction.options.getString('time');
+  const duration = interaction.options.getString('duration');
+  const host = interaction.user;
 
-    sessions[sessionId] = {
-      host: host.id,
-      time,
-      duration,
-      driver: null,
-      trainee: null,
-      junior: null,
-    };
-    saveSessions(sessions);
+  const sessions = loadSessions();
+  const sessionId = interaction.id;
 
-    const embed = new EmbedBuilder()
-      .setTitle("🚗 Driving Session")
-      .setColor(0x00bfff)
-      .setDescription(
-        `**Host:** ${host}\n**Time:** ${time}\n**Duration:** ${duration} minutes\n\n` +
-        "**Sign-ups:**\n" +
-        "🏎️ Driver — None\n" +
-        "🎓 Trainee — None\n" +
-        "👮 Junior Staff — None"
-      );
+  sessions[sessionId] = {
+    host: host.id,
+    time,
+    duration,
+    driver: null,
+    trainee: null,
+    junior: null,
+    closed: false
+  };
+  saveSessions(sessions);
 
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`driver_${sessionId}`).setLabel("Driver").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`trainee_${sessionId}`).setLabel("Trainee").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`junior_${sessionId}`).setLabel("Junior Staff").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`cancel_${sessionId}`).setLabel("Cancel").setStyle(ButtonStyle.Danger)
+  const embed = new EmbedBuilder()
+    .setTitle('🚗 Driving Session')
+    .setColor(0x00bfff)
+    .setDescription(
+      `**Host:** ${host}\n**Time:** ${time}\n**Duration:** ${duration} minutes\n\n` +
+      '**Sign-ups:**\n' +
+      '🏎️ Driver — None\n' +
+      '🎓 Trainee — None\n' +
+      '👮 Junior Staff — None'
     );
 
-    await interaction.reply({ embeds: [embed], components: [row] });
-  }
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`driver_${sessionId}`).setLabel('Driver').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`trainee_${sessionId}`).setLabel('Trainee').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`junior_${sessionId}`).setLabel('Junior Staff').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`cancel_${sessionId}`).setLabel('Cancel').setStyle(ButtonStyle.Danger)
+  );
+
+  await interaction.reply({ embeds: [embed], components: [row] });
 });
 
 // --- Handle Button Interactions ---
-client.on("interactionCreate", async interaction => {
+client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
-  const [role, sessionId] = interaction.customId.split("_");
+  const [role, sessionId] = interaction.customId.split('_');
   const sessions = loadSessions();
   const session = sessions[sessionId];
-  if (!session) return interaction.reply({ content: "Session not found.", ephemeral: true });
+
+  if (!session) return interaction.reply({ content: 'Session not found.', ephemeral: true });
+  if (session.closed)
+    return interaction.reply({ content: '🚫 This session is already closed.', ephemeral: true });
 
   const embed = EmbedBuilder.from(interaction.message.embeds[0]);
 
-  if (role === "cancel") {
-    let updated = false;
-    for (const key of ["driver", "trainee", "junior"]) {
-      if (session[key] === interaction.user.id) {
-        session[key] = null;
-        updated = true;
-      }
-    }
-    if (!updated)
-      return interaction.reply({ content: "You are not signed up for this session.", ephemeral: true });
+  if (role === 'cancel') {
+    session.closed = true;
     saveSessions(sessions);
-    await updateEmbed(interaction, session, embed);
-    return interaction.reply({ content: "❌ You cancelled your spot.", ephemeral: true });
+
+    embed.setTitle('🚫 Driving Session Closed').setColor(0xff0000);
+    const disabledRow = new ActionRowBuilder().addComponents(
+      interaction.message.components[0].components.map(b => ButtonBuilder.from(b).setDisabled(true))
+    );
+
+    await interaction.message.edit({ embeds: [embed], components: [disabledRow] });
+    return interaction.reply({ content: '🛑 The session has been closed.', ephemeral: true });
   }
 
+  // --- Remove user from any previous spot ---
+  for (const key of ['driver', 'trainee', 'junior']) {
+    if (session[key] === interaction.user.id) {
+      session[key] = null;
+    }
+  }
+
+  // --- Check if role already taken ---
   if (session[role]) {
-    return interaction.reply({ content: `That ${role} spot is already taken!`, ephemeral: true });
+    return interaction.reply({ content: `❌ That ${role} spot is already taken.`, ephemeral: true });
   }
 
+  // --- Assign user to the new role ---
   session[role] = interaction.user.id;
   saveSessions(sessions);
-  await updateEmbed(interaction, session, embed);
+
+  embed.setDescription(
+    `**Host:** <@${session.host}>\n**Time:** ${session.time}\n**Duration:** ${session.duration} minutes\n\n` +
+    '**Sign-ups:**\n' +
+    `🏎️ Driver — ${session.driver ? `<@${session.driver}>` : 'None'}\n` +
+    `🎓 Trainee — ${session.trainee ? `<@${session.trainee}>` : 'None'}\n` +
+    `👮 Junior Staff — ${session.junior ? `<@${session.junior}>` : 'None'}`
+  );
+
+  await interaction.message.edit({ embeds: [embed] });
   return interaction.reply({ content: `✅ You signed up as ${role}!`, ephemeral: true });
 });
-
-async function updateEmbed(interaction, data, embed) {
-  embed.setDescription(
-    `**Host:** <@${data.host}>\n**Time:** ${data.time}\n**Duration:** ${data.duration} minutes\n\n` +
-    "**Sign-ups:**\n" +
-    `🏎️ Driver — ${data.driver ? `<@${data.driver}>` : "None"}\n` +
-    `🎓 Trainee — ${data.trainee ? `<@${data.trainee}>` : "None"}\n` +
-    `👮 Junior Staff — ${data.junior ? `<@${data.junior}>` : "None"}`
-  );
-  await interaction.message.edit({ embeds: [embed], components: interaction.message.components });
-}
 
 // --- Start Bot ---
 client.login(TOKEN);
