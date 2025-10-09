@@ -26,7 +26,7 @@ let sessionData = {
     channelId: null, 
     host: null,
     time: null,
-    duration: null,
+    duration: null, // RESTORED: Duration
     driver: [],
     trainee: [],
     junior: [],
@@ -76,6 +76,7 @@ client.once(Events.ClientReady, () => {
  * @returns {object} The message payload (content string).
  */
 function generateSessionContent() {
+    // RESTORED: Use time and duration
     const time = sessionData.time || 'TBD';
     const duration = sessionData.duration || 'TBD';
 
@@ -123,6 +124,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const { commandName } = interaction;
 
         if (commandName === 'sessionbook') {
+            // RESTORED: Get time and duration
             const time = interaction.options.getString('time');
             const duration = interaction.options.getString('duration');
             const hostUser = interaction.options.getUser('host') || interaction.user;
@@ -136,7 +138,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 channelId: interaction.channelId, 
                 host: hostId,
                 time: time,
-                duration: duration,
+                duration: duration, // RESTORED: Store duration
                 driver: [],
                 trainee: [],
                 junior: [],
