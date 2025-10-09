@@ -126,7 +126,10 @@ client.on('interactionCreate', async interaction => {
 
 // --- Handle Button Interactions ---
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isButton()) return;
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== 'sessionbook') return;
+
+  await interaction.deferReply({ ephemeral: false }); // ✅ defer early
 
   const [role, sessionId] = interaction.customId.split('_');
   const sessions = loadSessions();
