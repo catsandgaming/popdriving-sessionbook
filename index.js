@@ -248,11 +248,6 @@ client.on(Events.InteractionCreate, async interaction => {
             return interaction.reply({ content: '❌ This session is **CLOSED**. Sign-ups are no longer allowed.', ephemeral: true });
         }
         
-        // Check if the user is already signed up for this role
-        if (sessionData[roleKey]?.includes(fullMember.id)) { // Added optional chaining here for safety
-            return interaction.reply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
-        }
-
         // --- Role Check Logic ---
         const isDriverSignup = (roleKey === 'driver');
         
@@ -261,6 +256,7 @@ client.on(Events.InteractionCreate, async interaction => {
         if (!isDriverSignup) {
             // Trainee and Junior Staff require the matching role
             const requiredRoleName = ROLE_NAMES[roleKey];
+            // Check if member has the required Discord role
             const hasRequiredRole = fullMember.roles.cache.some(r => r.name === requiredRoleName);
 
             if (!hasRequiredRole) {
@@ -272,6 +268,15 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         
         // --- Core Sign-up Logic: Sign up for the chosen role and remove from others ---
+
+        // Check if the user is already signed up for *this* role after passing the role eligibility checks
+        const alreadySignedUpForThisRole = sessionData[roleKey]?.includes(fullMember.id);
+
+        if (alreadySignedUpForThisRole) {
+            return interaction.reply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
+        }
+        
+        // If the user is eligible and not already signed up, proceed to switch roles
         Object.keys(roleMap).forEach(role => {
             if (role !== roleKey) {
                 // Filter user ID out of other role lists, safely using empty array if sessionData[role] is missing
@@ -282,7 +287,7 @@ client.on(Events.InteractionCreate, async interaction => {
         // Add user ID to the new role list
         sessionData[roleKey].push(fullMember.id);
 
-        await interaction.reply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**!`, ephemeral: true });
+        await interaction.reply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**! You have been removed from any previous role.`, ephemeral: true });
         updateSessionMessage();
     }
 });
