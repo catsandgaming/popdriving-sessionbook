@@ -19,15 +19,14 @@ const client = new Client({
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// The ID of the channel where sessions should be posted.
-const SESSION_CHANNEL_ID = 'YOUR_CHANNEL_ID_HERE'; 
-
 // --- In-memory Session State ---
 // This ID tracks the ONLY message currently active for sign-ups.
 let activeSessionMessageId = null; 
 
 // Session data structure (will be reset for each new session)
 let sessionData = {
+    // New property to store the channel where the session was created
+    channelId: null, 
     host: null,
     time: null,
     duration: null,
@@ -62,7 +61,7 @@ client.once(Events.ClientReady, () => {
  * @returns {object} The message payload (content string).
  */
 function generateSessionContent() {
-    // Check for null values gracefully, although the command inputs should prevent this.
+    // The time and duration will now be properly injected from the slash command
     const time = sessionData.time || 'TBD';
     const duration = sessionData.duration || 'TBD';
 
@@ -84,9 +83,10 @@ Duration: ${duration}
  * Updates the session message content and buttons in the channel.
  */
 async function updateSessionMessage() {
-    if (!activeSessionMessageId) return;
+    if (!activeSessionMessageId || !sessionData.channelId) return; // Must have an active message and channel ID
 
-    const channel = await client.channels.fetch(SESSION_CHANNEL_ID);
+    // Use the channel ID saved when the command was run
+    const channel = await client.channels.fetch(sessionData.channelId);
     if (!channel) return;
     
     try {
@@ -97,7 +97,7 @@ async function updateSessionMessage() {
         await message.edit({ ...content, components: [buttons] });
     } catch (err) {
         // If the message was deleted or fetch failed, clear the active ID.
-        console.error('Failed to update session message (it might have been manually deleted):', err.message);
+        console.error('Failed to update session message (it might have been manually deleted or bot restarted):', err.message);
         activeSessionMessageId = null; 
     }
 }
@@ -110,11 +110,6 @@ client.on(Events.InteractionCreate, async interaction => {
     const { commandName } = interaction;
 
     if (commandName === 'sessionbook') {
-        // Optional: Channel restriction check
-        if (SESSION_CHANNEL_ID !== 'YOUR_CHANNEL_ID_HERE' && interaction.channelId !== SESSION_CHANNEL_ID) {
-             return interaction.reply({ content: `❌ Please use this command in the designated session channel.`, ephemeral: true });
-        }
-
         // 1. Get dynamic inputs
         const time = interaction.options.getString('time');
         const duration = interaction.options.getString('duration');
@@ -123,6 +118,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
         // 2. Reset and update global session state with new details
         sessionData = {
+            channelId: interaction.channelId, // Store the channel ID here
             host: hostId,
             time: time,
             duration: duration,
@@ -175,7 +171,7 @@ client.on(Events.InteractionCreate, async interaction => {
         // Ensure sessionData is valid before iterating
         if (sessionData && typeof sessionData === 'object') {
             Object.keys(roleMap).forEach(roleKey => {
-                const initialLength = sessionData[roleKey]?.length || 0; // Use optional chaining and default to 0
+                const initialLength = sessionData[roleKey]?.length || 0; 
                 if (sessionData[roleKey]) {
                     sessionData[roleKey] = sessionData[roleKey].filter(u => u !== member.id);
                     if (sessionData[roleKey].length < initialLength) {
@@ -199,6 +195,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // Check if member has the Discord role before signing up
     const requiredRoleName = ROLE_NAMES[roleKey];
+    // We assume the bot has permission to fetch roles.
     const hasRequiredRole = member.roles.cache.some(r => r.name === requiredRoleName);
 
     if (!hasRequiredRole) {
