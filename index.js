@@ -131,13 +131,15 @@ client.on(Events.InteractionCreate, async interaction => {
         const { commandName } = interaction;
 
         if (commandName === 'sessionbook') {
+            
+            // CRITICAL: Acknowledge the command immediately to avoid the "Unknown interaction" (10062) timeout
+            // Moved to the top of the logic block.
+            await interaction.deferReply({ ephemeral: true });
+
             const time = interaction.options.getString('time');
             const duration = interaction.options.getString('duration');
             const hostUser = interaction.options.getUser('host') || interaction.user;
             const hostId = hostUser.id;
-
-            // CRITICAL: Acknowledge the command immediately to avoid the "Unknown interaction" (10062) timeout
-            await interaction.deferReply({ ephemeral: true });
 
             // 2. Reset and update global session state
             sessionData = {
