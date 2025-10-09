@@ -182,112 +182,127 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.isButton()) {
         
-        // **CRITICAL FIX:** Defer the reply immediately to prevent the DiscordAPIError[10062] timeout.
-        await interaction.deferReply({ ephemeral: true });
+        // FIX: Wrap the entire button logic in a try/catch to prevent the 
+        // bot process from crashing on the DiscordAPIError[10062] timeout.
+        try {
+            // **CRITICAL FIX:** Defer the reply immediately to prevent the DiscordAPIError[10062] timeout.
+            await interaction.deferReply({ ephemeral: true });
 
-        // 1. Check for Active Session and Timeout
-        if (!activeSessionMessageId || interaction.message.id !== activeSessionMessageId) {
-            return interaction.editReply({ content: '❌ This sign-up is for a past session or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
-        }
-        
-        // --- CRITICAL CLOSED SESSION GATE (Fix for Issue #1) ---
-        // Block all non-management actions if the session is closed.
-        if (sessionData.isClosed && interaction.customId !== 'close_session') {
-            return interaction.editReply({ content: '❌ This session is **CLOSED**. No further sign-ups or cancellations are allowed.', ephemeral: true });
-        }
-        // --- END CRITICAL CLOSED SESSION GATE ---
-
-        const member = interaction.member;
-        // Fetch full member data needed for role checks
-        const fullMember = await interaction.guild.members.fetch(member.id).catch(e => {
-            console.error('Could not fetch member for role check:', e.message);
-        });
-
-        if (!fullMember) return interaction.editReply({ content: 'Cannot fetch member info for role verification.', ephemeral: true });
-
-
-        const id = interaction.customId;
-        const roleMap = {
-            signup_driver: 'driver',
-            signup_trainee: 'trainee',
-            signup_junior: 'junior'
-        };
-        
-        // --- Handle Close Session Button ---
-        if (id === 'close_session') {
-            // If already closed, just inform the user and exit.
-            if (sessionData.isClosed) {
-                return interaction.editReply({ content: 'ℹ️ The session is already closed.', ephemeral: true });
+            // 1. Check for Active Session and Timeout
+            if (!activeSessionMessageId || interaction.message.id !== activeSessionMessageId) {
+                return interaction.editReply({ content: '❌ This sign-up is for a past session or the bot recently restarted. Please start a new session using `/sessionbook`.', ephemeral: true });
             }
             
-            const isHost = fullMember.id === sessionData.host;
-            // Check for the "POP Staff" role
-            const isStaff = fullMember.roles.cache.some(r => r.name === ROLE_NAMES.pop_staff);
+            // --- CRITICAL CLOSED SESSION GATE (Fix for Issue #1) ---
+            // Block all non-management actions if the session is closed.
+            if (sessionData.isClosed && interaction.customId !== 'close_session') {
+                return interaction.editReply({ content: '❌ This session is **CLOSED**. No further sign-ups or cancellations are allowed.', ephemeral: true });
+            }
+            // --- END CRITICAL CLOSED SESSION GATE ---
 
-            if (!isHost && !isStaff) {
-                return interaction.editReply({ content: `❌ Only the host or a **${ROLE_NAMES.pop_staff}** member can close this session.`, ephemeral: true });
+            const member = interaction.member;
+            // Fetch full member data needed for role checks
+            const fullMember = await interaction.guild.members.fetch(member.id).catch(e => {
+                console.error('Could not fetch member for role check:', e.message);
+            });
+
+            if (!fullMember) return interaction.editReply({ content: 'Cannot fetch member info for role verification.', ephemeral: true });
+
+
+            const id = interaction.customId;
+            const roleMap = {
+                signup_driver: 'driver',
+                signup_trainee: 'trainee',
+                signup_junior: 'junior'
+            };
+            
+            // --- Handle Close Session Button ---
+            if (id === 'close_session') {
+                // If already closed, just inform the user and exit.
+                if (sessionData.isClosed) {
+                    return interaction.editReply({ content: 'ℹ️ The session is already closed.', ephemeral: true });
+                }
+                
+                const isHost = fullMember.id === sessionData.host;
+                // Check for the "POP Staff" role
+                const isStaff = fullMember.roles.cache.some(r => r.name === ROLE_NAMES.pop_staff);
+
+                if (!isHost && !isStaff) {
+                    return interaction.editReply({ content: `❌ Only the host or a **${ROLE_NAMES.pop_staff}** member can close this session.`, ephemeral: true });
+                }
+                
+                sessionData.isClosed = true;
+                
+                // Acknowledge the button click and update the message
+                await interaction.editReply({ content: '✅ Session has been **CLOSED**. No further sign-ups are allowed.', ephemeral: true });
+                return updateSessionMessage(interaction.message); // Updated call site
+            }
+
+            // The 'cancel_slot' handler has been removed as the button is no longer present.
+
+            const roleKey = roleMap[id];
+            if (!roleKey) return interaction.deleteReply(); // Delete deferred reply
+
+            
+            // --- Role Check Logic ---
+            const isDriverSignup = (roleKey === 'driver');
+            
+            // **Driver role allows everyone (no role check)**
+
+            if (!isDriverSignup) {
+                // Trainee and Junior Staff require the matching role
+                const requiredRoleName = ROLE_NAMES[roleKey];
+                // Check if member has the required Discord role
+                const hasRequiredRole = fullMember.roles.cache.some(r => r.name === requiredRoleName);
+
+                if (!hasRequiredRole) {
+                    // This handles why you couldn't switch to Junior Staff if you didn't have the role.
+                    return interaction.editReply({ 
+                        content: `❌ You do not have the required Discord role: **${requiredRoleName}**.`, 
+                        ephemeral: true 
+                    });
+                }
             }
             
-            sessionData.isClosed = true;
+            // --- Core Sign-up Logic: Sign up for the chosen role and remove from others ---
+
+            // Check if the user is already signed up for *this* specific role.
+            const alreadySignedUpForThisRole = sessionData[roleKey]?.includes(fullMember.id);
+
+            if (alreadySignedUpForThisRole) {
+                // User clicked the button for the role they already have.
+                return interaction.editReply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
+            }
             
-            // Acknowledge the button click and update the message
-            await interaction.editReply({ content: '✅ Session has been **CLOSED**. No further sign-ups are allowed.', ephemeral: true });
-            return updateSessionMessage(interaction.message); // Updated call site
-        }
+            // If the user is eligible and either not signed up or switching roles:
+            
+            // 1. Remove user ID from all other role lists
+            // FIX: Use the list of internal session role keys (SESSION_ROLE_KEYS) 
+            // instead of the button map keys to correctly clear the sign-ups.
+            SESSION_ROLE_KEYS.forEach(currentRoleKey => {
+                if (currentRoleKey !== roleKey) {
+                    // Filter user ID out of other role lists
+                    sessionData[currentRoleKey] = (sessionData[currentRoleKey] ?? []).filter(u => u !== fullMember.id);
+                }
+            });
 
-        // The 'cancel_slot' handler has been removed as the button is no longer present.
+            // 2. Add user ID to the new role list
+            sessionData[roleKey].push(fullMember.id);
 
-        const roleKey = roleMap[id];
-        if (!roleKey) return interaction.deleteReply(); // Delete deferred reply
-
+            await interaction.editReply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**! You have been removed from any previous role.`, ephemeral: true });
+            updateSessionMessage(interaction.message); // Updated call site
         
-        // --- Role Check Logic ---
-        const isDriverSignup = (roleKey === 'driver');
-        
-        // **Driver role allows everyone (no role check)**
-
-        if (!isDriverSignup) {
-            // Trainee and Junior Staff require the matching role
-            const requiredRoleName = ROLE_NAMES[roleKey];
-            // Check if member has the required Discord role
-            const hasRequiredRole = fullMember.roles.cache.some(r => r.name === requiredRoleName);
-
-            if (!hasRequiredRole) {
-                // This handles why you couldn't switch to Junior Staff if you didn't have the role.
-                return interaction.editReply({ 
-                    content: `❌ You do not have the required Discord role: **${requiredRoleName}**.`, 
-                    ephemeral: true 
-                });
+        } catch (error) {
+            // Check specifically for the Unknown Interaction error code (10062)
+            if (error.code === 10062) {
+                // If the interaction expired, log it but don't crash the bot.
+                // We cannot send a reply here because the token is gone.
+                console.error('Interaction Expired (10062). User likely clicked the button too late.', error.message);
+                return; // Exit gracefully
             }
+            // For all other errors, log and continue.
+            console.error('Unhandled error during button interaction:', error);
         }
-        
-        // --- Core Sign-up Logic: Sign up for the chosen role and remove from others ---
-
-        // Check if the user is already signed up for *this* specific role.
-        const alreadySignedUpForThisRole = sessionData[roleKey]?.includes(fullMember.id);
-
-        if (alreadySignedUpForThisRole) {
-            // User clicked the button for the role they already have.
-            return interaction.editReply({ content: `ℹ️ You are already signed up as ${ROLE_NAMES[roleKey]}.`, ephemeral: true });
-        }
-        
-        // If the user is eligible and either not signed up or switching roles:
-        
-        // 1. Remove user ID from all other role lists
-        // FIX: Use the list of internal session role keys (SESSION_ROLE_KEYS) 
-        // instead of the button map keys to correctly clear the sign-ups.
-        SESSION_ROLE_KEYS.forEach(currentRoleKey => {
-            if (currentRoleKey !== roleKey) {
-                // Filter user ID out of other role lists
-                sessionData[currentRoleKey] = (sessionData[currentRoleKey] ?? []).filter(u => u !== fullMember.id);
-            }
-        });
-
-        // 2. Add user ID to the new role list
-        sessionData[roleKey].push(fullMember.id);
-
-        await interaction.editReply({ content: `✅ You signed up as **${ROLE_NAMES[roleKey]}**! You have been removed from any previous role.`, ephemeral: true });
-        updateSessionMessage(interaction.message); // Updated call site
     }
 });
 
